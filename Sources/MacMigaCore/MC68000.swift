@@ -130,6 +130,11 @@ public struct MC68000: Equatable, Sendable {
             } else {
                 programCounter = condition == 0 || conditionHolds(condition) ? target : returnAddress
             }
+        case _ where opcode & 0xF000 == 0x5000 && opcode & 0x00C0 != 0x00C0, // ADDQ / SUBQ
+             _ where opcode & 0xB000 == 0x9000: // SUB/SUBA ($9xxx), ADD/ADDA ($Dxxx)
+            var next = self
+            try next.arithmetic(opcode, memory: &memory)
+            self = next
         default:
             throw CPUError.unsupportedInstruction(opcode: opcode, address: instructionAddress)
         }
@@ -137,6 +142,100 @@ public struct MC68000: Equatable, Sendable {
 
     private enum MoveOperand {
         case data(Int), address(Int), memory(UInt32), immediate(UInt32)
+    }
+
+    /// ADD, ADDA, ADDQ, SUB, SUBA and SUBQ. ADDX/SUBX encodings are rejected.
+    private mutating func arithmetic(_ opcode: UInt16, memory: inout AmigaMemory) throws {
+        let mode = Int((opcode >> 3) & 7)
+        let register = Int(opcode & 7)
+        let upper = Int((opcode >> 9) & 7)
+        let opmode = Int((opcode >> 6) & 7)
+        let quick = opcode & 0xF000 == 0x5000
+        let subtract = quick ? opcode & 0x0100 != 0 : opcode & 0x4000 == 0
+        let addressForm = !quick && opmode & 3 == 3 // ADDA / SUBA
+        let size = addressForm ? (opmode == 3 ? 2 : 4) : [1, 2, 4][opmode & 3]
+        let toEffectiveAddress = quick || (!addressForm && opmode >= 4)
+        let legal: Bool
+        if toEffectiveAddress {
+            let alterable = mode <= 6 || (mode == 7 && register <= 1)
+            // Register modes of the Dn,<ea> form encode ADDX/SUBX instead.
+            legal = alterable && (quick ? !(mode == 1 && size == 1) : mode >= 2)
+        } else {
+            legal = (mode != 7 || register <= 4) && !(mode == 1 && size == 1)
+        }
+        guard legal else {
+            throw CPUError.unsupportedInstruction(opcode: opcode, address: programCounter)
+        }
+
+        var cursor = programCounter &+ 2
+        let mask: UInt32 = size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFF_FFFF
+        let source: UInt32
+        let target: MoveOperand
+        if quick {
+            source = UInt32(upper == 0 ? 8 : upper)
+            target = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
+        } else if toEffectiveAddress {
+            source = self[data: upper] & mask
+            target = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
+        } else {
+            let operand = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
+            source = try read(operand, size: size, memory: memory)
+            target = addressForm ? .address(upper) : .data(upper)
+        }
+
+        if case .address(let index) = target {
+            // Address destinations use all 32 bits and leave the condition codes unchanged.
+            let operand = addressForm && size == 2 ? Self.signExtendWord(UInt16(source)) : source
+            self[address: index] = subtract ? self[address: index] &- operand : self[address: index] &+ operand
+            programCounter = cursor
+            return
+        }
+
+        let destination = try read(target, size: size, memory: memory)
+        let result = (subtract ? destination &- source : destination &+ source) & mask
+        let sign = UInt32(1) << (size * 8 - 1)
+        let carry = subtract ? source > destination : result < destination
+        let overflow = subtract
+            ? (source ^ destination) & (destination ^ result) & sign != 0
+            : (source ^ result) & (destination ^ result) & sign != 0
+        try write(result, to: target, size: size, memory: &memory)
+        status &= 0xFFE0
+        if carry { status |= 0x11 } // X and C
+        if result & sign != 0 { status |= 0x08 }
+        if result == 0 { status |= 0x04 }
+        if overflow { status |= 0x02 }
+        programCounter = cursor
+    }
+
+    private func read(_ operand: MoveOperand, size: Int, memory: AmigaMemory) throws -> UInt32 {
+        let mask: UInt32 = size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFF_FFFF
+        switch operand {
+        case .data(let register): return self[data: register] & mask
+        case .address(let register): return self[address: register] & mask
+        case .immediate(let value): return value & mask
+        case .memory(let address):
+            switch size {
+            case 1: return UInt32(try memory.readByte(at: address))
+            case 2: return UInt32(try memory.readWord(at: address))
+            default: return try memory.readLong(at: address)
+            }
+        }
+    }
+
+    private mutating func write(_ value: UInt32, to operand: MoveOperand, size: Int,
+                                memory: inout AmigaMemory) throws {
+        let mask: UInt32 = size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFF_FFFF
+        switch operand {
+        case .data(let register): self[data: register] = (self[data: register] & ~mask) | value
+        case .address(let register): self[address: register] = value
+        case .memory(let address):
+            switch size {
+            case 1: try memory.writeByte(UInt8(value), at: address)
+            case 2: try memory.writeWord(UInt16(value), at: address)
+            default: try memory.writeLong(value, at: address)
+            }
+        case .immediate: preconditionFailure("Immediate operands are not writable")
+        }
     }
 
     private mutating func move(_ opcode: UInt16, memory: inout AmigaMemory) throws {
