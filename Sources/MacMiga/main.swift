@@ -597,8 +597,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             // Kickstart 1.x (before version 36) has no Fast File System in ROM.
             let version = emulator.romURL.flatMap { try? Data(contentsOf: $0) }.map { $0.count > 13 ? Int($0[12]) << 8 | Int($0[13]) : 0 }
-            try Data(try FastFileSystem.hardfile(from: sources, autoStart: true,
-                                                 fastFileSystem: (version ?? 40) >= 36)).write(to: destination)
+            // With WHDLoad, the Kickstart images beside the loaded one go to Devs/Kickstarts
+            // under the names WHDLoad's Kickstart emulation looks for.
+            let folder = emulator.romURL?.deletingLastPathComponent()
+            let files = folder.flatMap { try? FileManager.default.contentsOfDirectory(at: $0, includingPropertiesForKeys: nil) } ?? []
+            let kickstarts = sources.count > 1
+                ? files.compactMap { url in (try? Data(contentsOf: url)).flatMap { VolumeEntry.whdloadKickstart(Array($0), date: AmigaDate(days: 0)) } }
+                : []
+            try Data(try FastFileSystem.hardfile(from: sources, autoStart: true, fastFileSystem: (version ?? 40) >= 36,
+                                                 kickstarts: kickstarts)).write(to: destination)
         } catch {
             alert("Could not make a hard disk from \(source.lastPathComponent): \(error)")
             return

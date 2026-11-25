@@ -14,6 +14,7 @@ var autoStart = false
 var ofs = false
 var international = false
 var directoryCache = false
+var kickstartFiles: [String] = []
 var rdb = false
 var fileSystems: [String] = []
 while let first = arguments.first, first.hasPrefix("--") {
@@ -25,6 +26,7 @@ while let first = arguments.first, first.hasPrefix("--") {
     else if first == "--ofs" { ofs = true }        // for Kickstart 1.x
     else if first == "--intl" { international = true } // DOS\2/DOS\3, for Kickstart 2.04+
     else if first == "--dircache" { directoryCache = true } // DOS\4/DOS\5, for Kickstart 3.0+
+    else if first == "--kickstart", !arguments.isEmpty { kickstartFiles.append(arguments.removeFirst()) } // for WHDLoad
     else if first == "--rdb" { rdb = true }        // a partitioned image from hardfiles
     else if first == "--fs", !arguments.isEmpty { fileSystems.append(arguments.removeFirst()) }
     else if first == "--exclude", !arguments.isEmpty { // a path from the top of a source, any case
@@ -43,7 +45,7 @@ if rdb { makePartitionedImage(arguments, fileSystems: fileSystems) }
 guard list ? arguments.count == 1 : extract ? arguments.count == 2 : arguments.count >= 2 else {
     print("""
     Usage: MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]...
-                        [--auto] [--ofs] [--intl] [--dircache] [--skip-long-names] <folder | archive.lha>... <output.hdf>
+                        [--auto] [--ofs] [--intl] [--dircache] [--kickstart ROM]... [--skip-long-names] <folder | archive.lha>... <output.hdf>
            MakeHardfile --rdb [--fs HEXTYPE:VERSION.REVISION:FILE]... <PARTITION>... <output.hdf>
              PARTITION: NAME=FILE.hdf or NAME=<MiB>M,type=HEXTYPE, then any of ,pri=N ,noboot ,nomount ,type=HEXTYPE
              e.g. --fs 50465303:19.2:pfs3aio DH0=system.hdf DH1=work.hdf,pri=-1 PFS=200M,type=50465303,noboot
@@ -78,10 +80,21 @@ do {
         print("\(output): \(entries.count) entries")
     } else {
         let sources = arguments.dropLast().map { URL(fileURLWithPath: $0) }
+        // Kickstart images for WHDLoad's Kickstart emulation, under the names it looks for.
+        let kickstarts = try kickstartFiles.map { path -> VolumeEntry in
+            let rom = Array(try Data(contentsOf: URL(fileURLWithPath: path)))
+            guard let entry = VolumeEntry.whdloadKickstart(rom, date: AmigaDate(days: 0)) else {
+                print("MakeHardfile: \(path) is not a Kickstart image WHDLoad knows")
+                exit(1)
+            }
+            print("Devs/Kickstarts/\(entry.path[2]) from \(path)")
+            return entry
+        }
         var skipped: [String] = []
         let image = try FastFileSystem.hardfile(from: sources, name: name, freeBytes: freeBytes, startupSequence: startup,
                                                 autoStart: autoStart, fastFileSystem: !ofs,
-                                                international: international, directoryCache: directoryCache) { path in
+                                                international: international, directoryCache: directoryCache,
+                                                kickstarts: kickstarts) { path in
             if excluded.contains(path.map { $0.lowercased() }) { return false }
             if skipNames, let last = path.last, !FastFileSystem.canStore(name: last) {
                 skipped.append(path.joined(separator: "/"))

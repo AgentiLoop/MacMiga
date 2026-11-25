@@ -704,3 +704,18 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
         #expect(free.count + reader.visited.count == reader.blocks)
     }
 }
+
+@Test func kickstartImagesGetWHDLoadsNames() throws {
+    #expect(VolumeEntry.crc32(Array("123456789".utf8)) == 0xCBF4_3926)
+    #expect(VolumeEntry.whdloadKickstart([UInt8](repeating: 1, count: 0x4_0000), date: stamp) == nil) // unknown image
+    // With the Kickstart files of this checkout, which are not in the repository.
+    let folder = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        .appendingPathComponent("Kickstart ROMs")
+    if let rom = try? Data(contentsOf: folder.appendingPathComponent("kickstart-1.3.rom")) {
+        let entry = try #require(VolumeEntry.whdloadKickstart(Array(rom), date: stamp)) // 256 KiB stored twice
+        #expect(entry.path == ["Devs", "Kickstarts", "kick34005.A500"] && entry.contents?.count == 0x4_0000)
+    }
+    if let rom = try? Data(contentsOf: folder.appendingPathComponent("kickstart-3.1-a500_a600_a2000.rom")) {
+        #expect(VolumeEntry.whdloadKickstart(Array(rom), date: stamp)?.path == ["Devs", "Kickstarts", "kick40063.A600"])
+    }
+}

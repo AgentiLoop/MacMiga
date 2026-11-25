@@ -697,7 +697,7 @@ the 512 KiB machine. For software that needs the extra chip memory, see
 ## Making a hard disk
 
 ```sh
-swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]... [--auto] [--ofs] [--intl] [--dircache] [--skip-long-names] <folder | archive.lha>... <output.hdf>
+swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]... [--auto] [--ofs] [--intl] [--dircache] [--kickstart ROM]... [--skip-long-names] <folder | archive.lha>... <output.hdf>
 swift run -c release MakeHardfile --rdb [--fs HEXTYPE:VERSION.REVISION:FILE]... <PARTITION>... <output.hdf>
 swift run -c release MakeHardfile --list <folder | archive.lha>
 swift run -c release MakeHardfile --extract <archive.lha> <new folder>
@@ -820,6 +820,26 @@ gave `CD pacman_HD` and `SYS:WHDLoad/C/WHDLoad pacman.slave PRELOAD`, and the
 probe (Kickstart 3.1, 8 MiB fast RAM) showed the game running from fast RAM
 with the same display registers and palette as below. The app's dialogs were
 not operated in this check.
+
+Some installs run the game on WHDLoad's Kickstart emulation and need a
+Kickstart image in `Devs:Kickstarts` under a fixed name (`kick34005.A500` for
+1.3, `kick40063.A600` for the 3.1 ROM of the A500/A600/A2000, and so on),
+beside its relocation file (`kick34005.A500.RTB` …, from Aminet's
+`util/boot/skick346.lha`). `MakeHardfile --kickstart ROM` puts a ROM there
+under that name when WHDLoad knows its CRC-32 (a 256 KiB image stored twice
+in a 512 KiB file is taken once); the app does the same, when it adds WHDLoad,
+with every known Kickstart in the folder of the loaded one. The `.RTB` files
+must come with the sources, for example a folder holding
+`Devs/Kickstarts/kick34005.A500.RTB`. Checked with WHDLoad's own Workbench 1.3
+install (whdload.de `apps/Workbench13.lha`, whose slave boots Kickstart 1.3
+under WHDLoad and takes its `data` directory as the boot volume), an empty
+`data` apart from a one-line startup-sequence, and
+`MakeHardfile --auto --kickstart kickstart-1.3.rom --kickstart kickstart-3.1-….rom`:
+on Kickstart 3.1 with 1 MiB of chip and 8 MiB of fast RAM the screen showed
+Kickstart 1.3's shell ("Copyright 1987 Commodore-Amiga, Inc.", "Release 1.3")
+and its "Unknown command" for the script's line, 1.3 having no built-in
+commands. With 512 KiB of chip RAM WHDLoad said the slave needs chip memory up
+to `$FF000`; the slave asks for 1 MiB of base memory.
 
 ```sh
 swift run -c release MakeHardfile --name WHD \

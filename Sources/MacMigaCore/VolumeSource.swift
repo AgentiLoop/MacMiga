@@ -59,10 +59,12 @@ extension FastFileSystem {
     /// from the sources. Without one, `autoStart` makes a startup-sequence (see
     /// `VolumeEntry.startupSequence(for:)`) if the sources have none. Files and directories whose path `include` rejects are left out.
     /// `fastFileSystem` false writes an OFS volume, for Kickstart 1.x; `international` the
-    /// international mode; `directoryCache` the directory-cache mode.
+    /// international mode; `directoryCache` the directory-cache mode. `kickstarts` are added
+    /// with the volume's date (see `VolumeEntry.whdloadKickstart`).
     public static func hardfile(from sources: [URL], name: String? = nil, freeBytes: Int? = nil,
                                 startupSequence: String? = nil, autoStart: Bool = false,
                                 fastFileSystem: Bool = true, international: Bool = false, directoryCache: Bool = false,
+                                kickstarts: [VolumeEntry] = [],
                                 include: ([String]) -> Bool = { _ in true }) throws -> [UInt8] {
         precondition(!sources.isEmpty)
         var entries = try sources.flatMap { try VolumeEntry.entries(of: $0, include: include) }
@@ -73,6 +75,7 @@ extension FastFileSystem {
         let now = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day, .hour, .minute, .second], from: Date())
         let date = AmigaDate(year: now.year ?? 1978, month: now.month ?? 1, day: now.day ?? 1,
                              hour: now.hour ?? 0, minute: now.minute ?? 0, second: now.second ?? 0)
+        entries += kickstarts.map { var entry = $0; entry.date = date; return entry }
         var startupSequence = startupSequence
         if startupSequence == nil, autoStart { startupSequence = VolumeEntry.startupSequence(for: entries) }
         if let startupSequence {
@@ -118,5 +121,41 @@ extension VolumeEntry {
         let whdloadPath = whdload(in: entries)?.path
         let programs = entries.filter { $0.isProgram && $0.path != whdloadPath && $0.path.last?.lowercased().hasSuffix(".slave") == false }
         return programs.count == 1 ? quoted(programs[0].path.joined(separator: "/")) : nil
+    }
+}
+
+extension VolumeEntry {
+    /// Kickstart images WHDLoad's Kickstart emulation loads, by the CRC-32 of the image, with
+    /// the name it looks for in `Devs:Kickstarts` (it also needs the matching `.RTB` file,
+    /// from Aminet's `util/boot/skick346.lha`).
+    static let whdloadKickstartNames: [UInt32: String] = [
+        0xA6CE_1636: "kick33180.A500",  // 1.2
+        0xC4F0_F55F: "kick34005.A500",  // 1.3
+        0xC3BD_B240: "kick37175.A500",  // 2.04
+        0xFC24_AE0D: "kick40063.A600",  // 3.1 A500/A600/A2000
+        0x1483_A091: "kick40068.A1200", // 3.1 A1200
+        0x9E6A_C152: "kick40068.A4000", // 3.1 A4000
+    ]
+
+    /// The Kickstart image as WHDLoad wants it, `Devs/Kickstarts/kick….`, or nil for an image
+    /// it does not know. A 256 KiB image stored twice in a 512 KiB file is taken once.
+    public static func whdloadKickstart(_ rom: [UInt8], date: AmigaDate) -> VolumeEntry? {
+        var image = rom
+        if image.count == 0x8_0000, image[..<0x4_0000].elementsEqual(image[0x4_0000...]) { image = Array(image[..<0x4_0000]) }
+        guard let name = whdloadKickstartNames[crc32(image)] else { return nil }
+        return VolumeEntry(path: ["Devs", "Kickstarts", name], contents: image, date: date)
+    }
+
+    /// CRC-32 (ISO-HDLC, the zip and PNG one).
+    static func crc32(_ bytes: [UInt8]) -> UInt32 {
+        var crc: UInt32 = 0xFFFF_FFFF
+        for byte in bytes { crc = crc32Table[Int((crc ^ UInt32(byte)) & 0xFF)] ^ crc >> 8 }
+        return ~crc
+    }
+
+    private static let crc32Table: [UInt32] = (0..<256).map { index in
+        var value = UInt32(index)
+        for _ in 0..<8 { value = value & 1 != 0 ? value >> 1 ^ 0xEDB8_8320 : value >> 1 }
+        return value
     }
 }
