@@ -9,8 +9,9 @@ emulated and played through the Mac's default output. The `MacMiga` app shows
 the emulated display in a window and forwards the Mac keyboard and mouse. Booting real AmigaOS
 Workbench disks or games has not been tested.
 
-**Hard disk:** a hardfile (`.hdf`, one AmigaDOS partition) can be attached as
-`DH0`. Kickstart 3.1 and 1.3 both boot from it and run its
+**Hard disk:** a hard disk image (`.hdf`) can be attached: either a hardfile
+(one AmigaDOS partition, mounted as `DH0`) or a partitioned image with a Rigid
+Disk Block, whose partitions are all mounted under their own names. Kickstart 3.1 and 1.3 both boot from it and run its
 `S/Startup-Sequence`; see "Expansion boards and hard disk" below. A hardfile
 can be made from a Mac folder or an LHA archive (see "Making a hard disk"); a
 game made that way from an LHA archive started from the hard disk under
@@ -227,12 +228,13 @@ without a registered maker):
   any real controller. Its boot ROM is generated for the assigned address
   (`$E90000` in practice) and holds a DiagArea with a Resident tag for
   `macmiga.device`. Kickstart copies the DiagArea and runs it: the device is
-  created, `DH0` is made with MakeDosNode and queued for booting at priority 0
-  (AddBootNode on Kickstart 2.0+, a BootNode on eb_MountList on 1.3), and the
-  BootPoint starts dos.library. A bootable floppy in DF0 has the higher
+  created, and each partition of the disk is made a DOS device with MakeDosNode
+  and queued with its boot priority (AddBootNode on Kickstart 2.0+, a BootNode
+  on eb_MountList on 1.3; a hardfile is one partition, `DH0`, at priority 0),
+  and the BootPoint starts dos.library. A bootable floppy in DF0 has the higher
   priority (5) and should still boot first; that was not tried.
 
-The 68000 code in the boot ROM is about 80 instructions. The work is done by
+The 68000 code in the boot ROM is about 90 instructions. The work is done by
 the host through three long-word registers on the board: `$8000` takes an
 IORequest pointer and performs the command at once (CMD_READ, CMD_WRITE,
 TD_FORMAT, TD_PROTSTATUS, TD_GETNUMTRACKS, TD_GETGEOMETRY; motor, seek, update,
@@ -242,11 +244,14 @@ returns IOERR_NOCMD), `$8004` fixes up the Resident tag in the DiagArea copy,
 and `$8008` fills in the device's library node. The controller only touches
 memory, never CPU registers.
 
-`HardDisk` holds a hardfile: one AmigaDOS partition with no partition table, at
+`HardDisk` holds the image in one of two forms. A hardfile is one AmigaDOS
+partition with no partition table, at
 512-byte blocks, 1 surface, 32 blocks per track and 2 reserved blocks (the
 layout UAE uses for hardfiles); blocks past the last whole cylinder are unused.
 The DosType comes from the image's first four bytes (`DOS\0`…`DOS\7`), else
-FFS. Images that start with a Rigid Disk Block (`RDSK`) are rejected. Transfers
+FFS. A partitioned image has a Rigid Disk Block (`RDSK`) in one of its first 16
+blocks, as on a real drive; see "Partitioned images" below. An image whose
+first block starts with `DOS` is always taken as a hardfile. Transfers
 are instant. Only an OFS (`DOS\0`) hardfile was tried under Kickstart 1.3,
 whose ROM has no Fast File System.
 
@@ -263,6 +268,43 @@ With `--fast 8` both ROMs list a memory header at `$200000`–`$A00000` in
 exec's memory list. In the app, the same FFS hardfile booted under Kickstart
 3.1 and the file on disk received the same changed blocks. No Workbench
 installation has been tried.
+
+### Partitioned images
+
+The Rigid Disk Block leads to a chain of partition blocks (`PART`). For each
+one `HardDisk` takes the device name, the flags and the DosEnvec (geometry,
+first and last cylinder, DosType, boot priority, up to 20 entries), and the
+boot ROM mounts it under that name. All partitions are on unit 0 of
+`macmiga.device`; the DosEnvec places each one on the disk. A partition
+flagged "no automount" is left out. One not flagged "bootable" is mounted at
+priority -128, which never boots. TD_GETGEOMETRY reports the cylinders, heads
+and sectors from the Rigid Disk Block.
+
+Rejected with an error: a table or partition block with a bad checksum or ID,
+a chain that loops or leaves the image, a block size other than 512 bytes, a
+partition that extends past the end of the image, and a table with nothing to
+mount. Not supported: file systems stored on the disk (`FSHD`/`LSEG` blocks)
+are not loaded, so a partition needs a file system Kickstart has in ROM (with
+any other DosType AmigaDOS will show it as not a DOS disk); bad-block lists
+and drive-init code are ignored.
+
+Checked on November 25, 2026 with the probe. The images were made by a script
+(not committed) that puts volumes from `MakeHardfile` behind a Rigid Disk Block
+it writes itself; no image made by HDToolBox or another Amiga partitioning
+program was at hand.
+
+| ROM | Image | Result |
+| --- | --- | --- |
+| Kickstart 3.1 | 2 heads × 16 sectors; `DH0` bootable, `DH1` not bootable, `DH2` no automount | booted from `DH0`; its script found a file on `DH1:` and wrote one there, and the changed blocks all lie inside `DH1`'s range. A script that named `DH2:` got AmigaDOS's "Please insert volume DH2" requester |
+| Kickstart 3.1 | the same two volumes, `DH0` at priority 0 and `DH1` at priority 2 | booted from `DH1`, whose script found `DH0:S` |
+| Kickstart 3.1 | 16 heads × 63 sectors, two partitions | booted from `DH0`, wrote and found a file on it, and found a file on `DH1:` |
+| Kickstart 1.3 | 2 heads × 16 sectors, two OFS partitions, `DH1` not bootable | booted from `DH0` (the CLI named the command from `DH0`'s script as unknown, 1.3 having no built-in commands) |
+| Kickstart 1.3 | the same, `DH1` at priority 3 | booted from `DH1` |
+
+The frames from hardfiles (a Kickstart 3.1 shell boot, WHDLoad with Pac-Man,
+and the Kickstart 1.3 boot) are identical to those before this change. Whether
+Kickstart 1.3 also mounts the partition it did not boot from was not checked.
+A partitioned image has not been attached in the app.
 
 ## Chip RAM and the ECS Agnus
 
@@ -463,7 +505,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-One hundred and fifty-two tests cover the memory foundation and CPU subset. Coverage includes
+One hundred and fifty-seven tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -502,6 +544,12 @@ base-address writes, shut-up, reset), fast RAM mapping, hardfile validation,
 every hard-disk command class with its error codes, write protection, the
 MakeDosNode packet, and the boot ROM's DiagPoint, Open, Close and BeginIO
 routines executed by the CPU against a stand-in ReplyMsg.
+Rigid-disk tests cover reading a partition table (in block 0, 3 or 15, the
+flags, priorities, long and short environment tables), every rejected case,
+the boot ROM's packet and table entry for each partition, requests anywhere on
+a partitioned disk with its geometry, and the boot ROM's initialisation run by
+the CPU against stand-in exec and expansion libraries that log their calls,
+for Kickstart 2.0+ and for 1.3.
 Volume tests cover LHA unpacking (the CRC-16 check value, an `-lh5-` stream
 with literals, overlapping and long matches and two blocks, made by a small
 encoder in the test, header levels 0–2, directory and file-name headers, Amiga
@@ -530,7 +578,7 @@ swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] 
 `--hdf` attaches a hardfile as DH0 (the file itself is never modified;
 `--hdf-out` writes the image as the Amiga left it), `--fast` adds fast RAM,
 `--chip` sets chip RAM in KiB. The
-probe then also prints the expansion boards and the blocks read and written.
+probe then also prints the expansion boards, the hard disk's partitions and the blocks read and written.
 When exec is running at the end, it prints exec's memory list, and for
 Kickstart 2.0 and newer graphics.library's ChipRevBits0 (which chips Kickstart
 found).
@@ -570,7 +618,8 @@ compatibility.
 
 ## Next milestones
 
-1. WHDLoad: try more installs and fix what breaks; Rigid Disk Block images.
+1. WHDLoad: try more installs and fix what breaks. Hard disk: load file
+   systems stored in a partition table; try an image partitioned on an Amiga.
 2. CPU package: move the instruction-level tests onto a plain RAM bus inside
    `Packages/M68K`; later a 68030/68040 with MMU and FPU for NeXT.
 3. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
