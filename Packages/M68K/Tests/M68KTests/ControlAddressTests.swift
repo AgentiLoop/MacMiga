@@ -1,9 +1,8 @@
 import Testing
-@testable import MacMigaCore
+import M68K
 
-private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> AmigaMemory {
-    var memory = try AmigaMemory(kickstart: [UInt8](repeating: 0, count: 256 * 1024))
-    memory.setOverlay(enabled: false)
+private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> TestBus {
+    var memory = TestBus()
     for (offset, word) in words.enumerated() {
         try memory.writeWord(word, at: address &+ UInt32(offset * 2))
     }
@@ -142,7 +141,7 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
                 cpu[address: 7] = 0x400
                 try memory.writeLong(0xDEADBEEF, at: 0x3FC)
                 let before = cpu
-                #expect(throws: MemoryBusError.unmappedAddress(0x200000)) {
+                #expect(throws: TestBus.Fault.unmapped(0x200000)) {
                     try cpu.step(memory: &memory)
                 }
                 #expect(cpu == before)
@@ -166,8 +165,8 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
         #expect(try memory.readWord(at: 0x1FFFFE) == (stack == 0x200002 ? 0xAB00 : 0xFFFF))
     }
     try check(stack: 0x403, CPUError.addressError(address: 0x3FF, isWrite: true))
-    try check(stack: 0x200004, MemoryBusError.unmappedAddress(0x200000))
-    try check(stack: 0x200002, MemoryBusError.unmappedAddress(0x200000))
+    try check(stack: 0x200004, TestBus.Fault.unmapped(0x200000))
+    try check(stack: 0x200002, TestBus.Fault.unmapped(0x200000))
 }
 
 @Test func jumpTargetFaultsOccurOnNextFetch() throws {
@@ -187,7 +186,7 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
     }
     for opcode: UInt16 in [0x4EF9, 0x4EB9] {
         try check(opcode, target: 0x301, CPUError.addressError(address: 0x301, isWrite: false))
-        try check(opcode, target: 0x200000, MemoryBusError.unmappedAddress(0x200000))
+        try check(opcode, target: 0x200000, TestBus.Fault.unmapped(0x200000))
     }
 }
 
@@ -198,8 +197,7 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
         rom[rom.count - 3] = UInt8(truncatingIfNeeded: opcode)
         rom[rom.count - 2] = opcode == 0x4EB9 ? 0x12 : 0
         rom[rom.count - 1] = opcode == 0x4EB9 ? 0x34 : 8
-        var memory = try AmigaMemory(kickstart: rom)
-        memory.setOverlay(enabled: false)
+        var memory = TestBus(rom: rom)
         try memory.writeWord(0x5678, at: 0)
         var cpu = MC68000()
         cpu.programCounter = 0xFFFFFFFC

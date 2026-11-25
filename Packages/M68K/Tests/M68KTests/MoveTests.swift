@@ -1,9 +1,8 @@
 import Testing
-@testable import MacMigaCore
+import M68K
 
-private func moveMemory(_ words: [UInt16]) throws -> AmigaMemory {
-    var memory = try AmigaMemory(kickstart: [UInt8](repeating: 0, count: 256 * 1024))
-    memory.setOverlay(enabled: false)
+private func moveMemory(_ words: [UInt16]) throws -> TestBus {
+    var memory = TestBus()
     for (index, word) in words.enumerated() {
         try memory.writeWord(word, at: 0x100 + UInt32(index * 2))
     }
@@ -197,8 +196,7 @@ private func moveMemory(_ words: [UInt16]) throws -> AmigaMemory {
     var rom = [UInt8](repeating: 0, count: 256 * 1024)
     rom[0x3FFFC] = 0x80
     rom[0x3FFFD] = 0x01
-    var memory = try AmigaMemory(kickstart: rom)
-    memory.setOverlay(enabled: false)
+    var memory = TestBus(rom: rom)
     // MOVE.W ($FFFC).W,D0; MOVE.W D0,($FFFC).W.
     for (offset, word): (UInt32, UInt16) in [(0, 0x3038), (2, 0xFFFC), (4, 0x31C0), (6, 0xFFFC)] {
         try memory.writeWord(word, at: 0x100 + offset)
@@ -254,14 +252,14 @@ private func moveMemory(_ words: [UInt16]) throws -> AmigaMemory {
     cpu.programCounter = 0x1FFFFE
     cpu[address: 0] = 0x300
     var before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
+    #expect(throws: TestBus.Fault.unmapped(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
     try memory.writeWord(0x20C0, at: 0x100) // MOVE.L D0,(A0)+ crosses RAM boundary.
     cpu.programCounter = 0x100
     cpu[address: 0] = 0x1FFFFE
     cpu[data: 0] = 0x1234_5678
     before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
+    #expect(throws: TestBus.Fault.unmapped(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
     #expect(try memory.readWord(at: 0x1FFFFE) == 0x1234)
 }

@@ -1,9 +1,8 @@
 import Testing
-@testable import MacMigaCore
+import M68K
 
-private func arithmeticMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> AmigaMemory {
-    var memory = try AmigaMemory(kickstart: [UInt8](repeating: 0, count: 256 * 1024))
-    memory.setOverlay(enabled: false)
+private func arithmeticMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> TestBus {
+    var memory = TestBus()
     for (offset, word) in words.enumerated() {
         try memory.writeWord(word, at: address &+ UInt32(offset * 2))
     }
@@ -206,10 +205,10 @@ private func referenceFlags(_ destination: UInt32, _ source: UInt32, size: Int, 
 }
 
 @Test func arithmeticFaultsPreserveCPU() throws {
-    let cases: [(UInt16, MemoryBusError)] = [
-        (0xD190, .unmappedAddress(0x200000)), // ADD.L D0,(A0)
-        (0x9098, .unmappedAddress(0x200000)), // SUB.L (A0)+,D0: A0 not incremented on fault
-        (0x5290, .unmappedAddress(0x200000))  // ADDQ.L #1,(A0)
+    let cases: [(UInt16, TestBus.Fault)] = [
+        (0xD190, .unmapped(0x200000)), // ADD.L D0,(A0)
+        (0x9098, .unmapped(0x200000)), // SUB.L (A0)+,D0: A0 not incremented on fault
+        (0x5290, .unmapped(0x200000))  // ADDQ.L #1,(A0)
     ]
     for (opcode, error) in cases {
         var memory = try arithmeticMemory([opcode])

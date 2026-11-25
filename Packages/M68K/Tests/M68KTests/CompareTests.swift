@@ -1,9 +1,8 @@
 import Testing
-@testable import MacMigaCore
+import M68K
 
-private func compareMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> AmigaMemory {
-    var memory = try AmigaMemory(kickstart: [UInt8](repeating: 0, count: 256 * 1024))
-    memory.setOverlay(enabled: false)
+private func compareMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> TestBus {
+    var memory = TestBus()
     for (offset, word) in words.enumerated() {
         try memory.writeWord(word, at: address &+ UInt32(offset * 2))
     }
@@ -163,7 +162,7 @@ private func compareFlags(_ destination: UInt32, _ source: UInt32, bits: Int) ->
     cpu.programCounter = 0x1FFFFE
     cpu[data: 0] = 7
     let before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
+    #expect(throws: TestBus.Fault.unmapped(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
 }
 
@@ -193,7 +192,7 @@ private func compareFlags(_ destination: UInt32, _ source: UInt32, bits: Int) ->
     cpu.programCounter = 0x100
     cpu[address: 0] = 0x200000
     let before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
+    #expect(throws: TestBus.Fault.unmapped(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
 }
 

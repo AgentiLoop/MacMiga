@@ -1,10 +1,9 @@
 import Testing
-@testable import MacMigaCore
+import M68K
 
-private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout AmigaMemory) throws -> Void = { _, _ in })
-    throws -> (MC68000, AmigaMemory) {
-    var memory = try AmigaMemory(kickstart: [UInt8](repeating: 0, count: 256 * 1024))
-    memory.setOverlay(enabled: false)
+private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout TestBus) throws -> Void = { _, _ in })
+    throws -> (MC68000, TestBus) {
+    var memory = TestBus()
     for (offset, word) in words.enumerated() { try memory.writeWord(word, at: 0x100 + UInt32(offset * 2)) }
     var cpu = MC68000()
     cpu.programCounter = 0x100

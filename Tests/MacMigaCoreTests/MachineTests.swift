@@ -99,3 +99,25 @@ private func store(_ words: [UInt16], at address: UInt32, in memory: inout Amiga
     #expect(machine.memory.ciaA.read(register: 0x8) == 1)          // one VSYNC
     #expect(machine.memory.ciaB.read(register: 0x8) == UInt8(CustomChips.linesPerFrame & 0xFF))
 }
+
+@Test func powerOnAndResetLoadTheVectorsThroughTheROMOverlay() throws {
+    var rom = [UInt8](repeating: 0, count: 256 * 1024)
+    rom.replaceSubrange(0..<8, with: [0, 8, 0, 0, 0, 0xFC, 0, 8])
+    rom.replaceSubrange(8..<12, with: [0x70, 0xFF, 0x4E, 0x71]) // moveq #-1,d0 ; nop
+    var machine = try AmigaMachine(kickstart: rom)
+    #expect(machine.memory.overlayEnabled)
+    #expect(machine.cpu.programCounter == 0xFC_0008)
+    #expect(machine.cpu.supervisorStackPointer == 0x08_0000)
+    #expect(machine.cpu.statusRegister == 0x2700)
+    try machine.step()
+    #expect(machine.cpu[data: 0] == 0xFFFF_FFFF)
+    #expect(machine.cpu.programCounter == 0xFC_000A)
+    // With the overlay off, address 4 is chip RAM; a reset brings the ROM's vectors back.
+    machine.memory.setOverlay(enabled: false)
+    try machine.memory.writeLong(0x0012_3456, at: 4)
+    _ = try machine.memory.reset()
+    try machine.cpu.reset(memory: &machine.memory)
+    #expect(machine.memory.overlayEnabled)
+    #expect(machine.cpu.programCounter == 0xFC_0008)
+    #expect(machine.cpu[data: 0] == 0xFFFF_FFFF) // general registers are kept
+}

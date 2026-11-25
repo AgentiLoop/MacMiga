@@ -1,9 +1,8 @@
 import Testing
-@testable import MacMigaCore
+import M68K
 
-private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> AmigaMemory {
-    var memory = try AmigaMemory(kickstart: [UInt8](repeating: 0, count: 256 * 1024))
-    memory.setOverlay(enabled: false)
+private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> TestBus {
+    var memory = TestBus()
     for (index, word) in words.enumerated() {
         try memory.writeWord(word, at: address &+ UInt32(index * 2))
     }
@@ -12,16 +11,15 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
 
 @Test func cpuResetLoadsVectorsAndRetainsGeneralRegisters() throws {
     var rom = [UInt8](repeating: 0, count: 256 * 1024)
-    rom.replaceSubrange(0..<8, with: [0, 8, 0, 0, 0, 0xFC, 0, 8])
     rom.replaceSubrange(8..<12, with: [0x70, 0xFF, 0x4E, 0x71])
-    var memory = try AmigaMemory(kickstart: rom)
-    memory.setOverlay(enabled: false)
+    var memory = TestBus(rom: rom)
+    try memory.writeLong(0x08_0000, at: 0) // initial SSP
+    try memory.writeLong(0xFC_0008, at: 4) // initial PC, in the ROM
     var cpu = MC68000()
     cpu.statusRegister = 0x8015
     cpu[data: 3] = 0x1234_5678
     cpu[address: 2] = 0x8765_4321
     cpu.userStackPointer = 0x1000
-    _ = try memory.reset() // the machine resets its devices (overlay back on), then the CPU
     try cpu.reset(memory: &memory)
     #expect(cpu.statusRegister == 0x2715)
     #expect(cpu.programCounter == 0xFC_0008)
@@ -29,7 +27,6 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
     #expect(cpu.userStackPointer == 0x1000)
     #expect(cpu[data: 3] == 0x1234_5678)
     #expect(cpu[address: 2] == 0x8765_4321)
-    #expect(memory.overlayEnabled)
     try cpu.step(memory: &memory)
     #expect(cpu[data: 0] == 0xFFFF_FFFF)
     #expect(cpu.programCounter == 0xFC_000A)
@@ -131,7 +128,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
     var rom = [UInt8](repeating: 0, count: 256 * 1024)
     rom[rom.count - 2] = 0x60
     rom[rom.count - 1] = 2
-    memory = try AmigaMemory(kickstart: rom)
+    memory = TestBus(rom: rom)
     var cpu = MC68000()
     cpu.programCounter = 0xFFFF_FFFE
     try cpu.step(memory: &memory)
@@ -207,7 +204,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
     cpu.stopsOnAddressError = true
     cpu.statusRegister = 0x2704
     var before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
+    #expect(throws: TestBus.Fault.unmapped(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
     for (pc, sp): (UInt32, UInt32) in [(0x100, 0x1001), (0x100, 0x200004), (0x102, 0x1001), (0x102, 0x200000)] {
         cpu.programCounter = pc
