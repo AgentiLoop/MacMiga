@@ -48,11 +48,15 @@ Swift errors are not yet translated into CPU bus/address-error exceptions.
 `Sources/MacMigaCore/MC68000.swift` implements D0–D7, A0–A7, banked
 user/supervisor stack pointers, status bits, and external reset-vector loading.
 The supported instructions are MOVE.B/W/L, MOVEA.W/L, LEA, JMP, JSR, MOVEQ,
-NOP, BRA, BSR, all 14 Bcc conditions, and RTS. MOVE supports register direct,
+ADD/ADDA/ADDQ, SUB/SUBA/SUBQ, NOP, BRA, BSR, all 14 Bcc conditions, and RTS.
+MOVE supports register direct,
 indirect, postincrement, predecrement, displacement, brief indexed, absolute,
 PC-relative source, and immediate source addressing. LEA, JMP, and JSR accept
-only control addressing modes and preserve condition codes. Branches support
-byte and word displacements. Unsupported opcodes throw an opcode/address diagnostic.
+only control addressing modes and preserve condition codes. ADD and SUB set
+X, N, Z, V, and C; address-register destinations (ADDA/SUBA and ADDQ/SUBQ to
+An) use all 32 bits and leave flags unchanged. ADDX/SUBX are not implemented.
+Branches support byte and word displacements. Unsupported opcodes throw an
+opcode/address diagnostic.
 
 This is functional stepping, not cycle-accurate emulation. Prefetch, interrupts,
 trace and other exceptions, and the remaining instruction set are absent.
@@ -64,12 +68,15 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-Thirty-nine tests cover the memory foundation and CPU subset. Coverage includes
+Forty-seven tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
 legal LEA/JMP/JSR mode across CCR and stack banks, invalid encodings, A7
-aliasing, JSR stack faults, and PC wrap. Existing exhaustive MOVEQ and branch
+aliasing, JSR stack faults, and PC wrap. Arithmetic tests check exhaustive
+byte ADD/SUB and word/long boundary values against an independent wide-integer
+flag reference, every ADDQ/SUBQ value and size, address-register forms, memory
+read-modify-write, invalid encodings, and faults. Existing exhaustive MOVEQ and branch
 condition tests remain. Synthetic programs exercise calls and memory copying.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
@@ -89,16 +96,21 @@ November 25, 2026 were each 524,288 bytes. Their measured startup results:
 
 | File | Reset PC | First unsupported opcode | Completed instructions |
 | --- | --- | --- | --- |
-| kickstart-1.3.rom | $00FC00D2 | $5380 at $00FC00DE | 2 |
-| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | $DA98 at $00F800E0 | 5 |
+| kickstart-1.3.rom | $00FC00D2 | $B1C9 (CMPA.L) at $00FC00EC | 262,148 |
+| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | $51C9 (DBF) at $00F800E6 | 7 |
+
+Kickstart 1.3 exceeds the probe's 10,000-instruction limit inside a startup
+countdown loop; its stop point above was measured with a separate local run
+without that limit.
 
 Neither ROM booted. The probe reports raw reset-vector values and does not
 validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. Extend CPU execution with arithmetic (SUBQ/ADD first, the next opcodes the
-   local ROMs reach), remaining instructions, exceptions, interrupts, and timing.
+1. Extend CPU execution with compare and DBcc (CMPA/CMP and DBF are the next
+   opcodes the local ROMs reach), then logic, shifts, remaining instructions,
+   exceptions, interrupts, and timing.
 2. CIA-A/B registers and timers, real overlay control, interrupt routing.
 3. OCS custom chips: raster timing, DMA, bitplanes, Copper, Blitter, and audio.
 4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
