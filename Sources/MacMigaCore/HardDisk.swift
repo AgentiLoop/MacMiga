@@ -24,6 +24,9 @@ public enum HardDiskError: Error, Equatable {
 ///   program in a chain of `LSEG` blocks); the controller's boot ROM loads them for the
 ///   partitions of their type, so a partition does not need a file system Kickstart has
 ///   in ROM. A damaged `FSHD` block ends that list without making the disk unusable.
+///   Bad-block lists (`BADB` blocks of bad and replacement block pairs) are honoured:
+///   reads and writes of a bad block go to its replacement, as a controller's driver
+///   remaps them; a damaged `BADB` block ends that list.
 ///
 /// An image whose first block starts with `DOS` is always taken as a hardfile.
 ///
@@ -78,6 +81,8 @@ public final class HardDisk {
     public let partitions: [Partition]
     /// The file systems in the partition table, in its order (none in a hardfile).
     public let fileSystems: [FileSystem]
+    /// Replacement blocks by bad block, from the partition table's bad-block list.
+    public let badBlocks: [Int: Int]
     /// Whether the image has a partition table (false for a hardfile).
     public let isPartitioned: Bool
     /// Drive geometry as reported to TD_GETGEOMETRY.
@@ -131,6 +136,7 @@ public final class HardDisk {
                               0, dosType],                     // de_BootPri, de_DosType
                 bootPriority: 0, deviceFlags: 0)]
             fileSystems = []
+            badBlocks = [:]
             return
         }
         guard isSummed(rigid) else { throw HardDiskError.invalidPartitionTable(block: rigid) }
@@ -193,6 +199,18 @@ public final class HardDisk {
                 program: program.flatMap { try? HunkFile($0) }))
         }
         fileSystems = systems
+        var remapped: [Int: Int] = [:]
+        next = long(rigid, 24) // rdb_BadBlockList
+        while next != 0xFFFF_FFFF {
+            let block = Int(next)
+            guard block < blocks, visited.insert(block).inserted, hasID(block, "BADB"), isSummed(block) else { break }
+            next = long(block, 16)                                   // bbb_Next
+            for pair in 0..<min(61, (Int(long(block, 4)) - 6) / 2) {
+                let bad = Int(long(block, 24 + pair * 8)), good = Int(long(block, 28 + pair * 8))
+                if bad != good, bad < blocks, good < blocks { remapped[bad] = good }
+            }
+        }
+        badBlocks = remapped
         // rdb_Cylinders, rdb_Sectors, rdb_Heads; a table without them gets the hardfile layout.
         let geometry = (Int(long(rigid, 64)), Int(long(rigid, 72)), Int(long(rigid, 68)))
         if geometry.0 > 0, geometry.1 > 0, geometry.2 > 0 {
@@ -211,17 +229,40 @@ public final class HardDisk {
         return modifiedBlocks.sorted()
     }
 
+    /// The image ranges holding `count` bytes from `offset`, with bad blocks replaced.
+    private func ranges(at offset: Int, count: Int) -> [Range<Int>] {
+        guard !badBlocks.isEmpty else { return [offset..<offset + count] }
+        var result: [Range<Int>] = []
+        var position = offset
+        while position < offset + count {
+            let block = position / Self.blockSize
+            let end = min(offset + count, (block + 1) * Self.blockSize)
+            let start = (badBlocks[block] ?? block) * Self.blockSize + position % Self.blockSize
+            if let last = result.last, last.upperBound == start {
+                result[result.count - 1] = last.lowerBound..<start + end - position
+            } else {
+                result.append(start..<start + end - position)
+            }
+            position = end
+        }
+        return result
+    }
+
     func read(at offset: Int, count: Int) -> ArraySlice<UInt8> {
         blocksRead += (count + Self.blockSize - 1) / Self.blockSize
-        return bytes[offset..<offset + count]
+        let parts = ranges(at: offset, count: count)
+        return parts.count == 1 ? bytes[parts[0]] : ArraySlice(parts.flatMap { bytes[$0] })
     }
 
     func write(_ data: [UInt8], at offset: Int) {
         guard !data.isEmpty else { return }
-        bytes.replaceSubrange(offset..<offset + data.count, with: data)
-        let blocks = offset / Self.blockSize...(offset + data.count - 1) / Self.blockSize
-        modifiedBlocks.formUnion(blocks)
-        blocksWritten += blocks.count
+        var taken = 0
+        for range in ranges(at: offset, count: data.count) {
+            bytes.replaceSubrange(range, with: data[taken..<taken + range.count])
+            taken += range.count
+            modifiedBlocks.formUnion(range.lowerBound / Self.blockSize...(range.upperBound - 1) / Self.blockSize)
+        }
+        blocksWritten += (offset + data.count - 1) / Self.blockSize - offset / Self.blockSize + 1
     }
 }
 

@@ -547,7 +547,17 @@ and sectors from the Rigid Disk Block.
 Rejected with an error: a table or partition block with a bad checksum or ID,
 a chain that loops or leaves the image, a block size other than 512 bytes, a
 partition that extends past the end of the image, and a table with nothing to
-mount. Bad-block lists and drive-init code are ignored.
+mount. Drive-init code is ignored.
+
+Bad-block lists (`BADB` blocks, each with up to 61 pairs of a bad block and its
+replacement) are honoured the way a controller's driver does it: a read or
+write of a bad block goes to its replacement, and the bad block itself is never
+touched. A damaged `BADB` block ends the list. Checked with the probe: in an
+image from `MakeHardfile --rdb`, the boot partition's root block and the data
+block of its startup-sequence were copied to spare blocks in the table's
+cylinders, overwritten with `$DEAD`, and listed as bad; Kickstart 3.1 mounted
+both volumes, ran the script and wrote its file to `DH1`, and the bad blocks
+still held `$DEAD` afterwards.
 
 Checked on November 25, 2026 with the probe. The images were made by a script
 (not committed) that puts volumes from `MakeHardfile` behind a Rigid Disk Block
@@ -1036,7 +1046,9 @@ the CPU against stand-in exec and expansion libraries that log their calls,
 for Kickstart 2.0+ and for 1.3, and writing partition tables: volumes kept
 byte for byte, flags and priorities, empty partitions, a table longer than two
 cylinders, file systems read back as the same load files, and rejected names,
-sizes, types and programs. For file systems in a partition table they
+sizes, types and programs; and bad-block lists: two chained `BADB` blocks,
+reads and writes across bad blocks (whole and partial), the blocks reported
+as modified, and a damaged list. For file systems in a partition table they
 cover the load-file reader (three hunks with long and short relocations, BSS
 and a chip-memory request, laid out as a segment list; six kinds of bad file),
 reading the headers and their `LSEG` chains including damaged ones, and the

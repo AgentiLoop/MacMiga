@@ -594,3 +594,48 @@ private let pfsPartitions = [
     #expect(log[4] == 2011)
     #expect(try longs(&other.memory, at: 0x7840, count: 11) == [UInt32](repeating: 0, count: 11))
 }
+
+// MARK: Bad-block lists
+
+/// Chains a BADB block for each list of (bad, replacement) pairs from block `first` on.
+private func addBadBlocks(_ lists: [[(Int, Int)]], to image: inout [UInt8], from first: Int = 5) {
+    for (index, pairs) in lists.enumerated() {
+        let block = first + index
+        image.replaceSubrange(block * 512..<(block + 1) * 512, with: [UInt8](repeating: 0, count: 512))
+        image.replaceSubrange(block * 512..<block * 512 + 4, with: Array("BADB".utf8))
+        put(UInt32(6 + 2 * pairs.count), &image, block, 4)
+        put(7, &image, block, 12)
+        put(index + 1 < lists.count ? UInt32(block + 1) : 0xFFFF_FFFF, &image, block, 16) // bbb_Next
+        for (pair, (bad, good)) in pairs.enumerated() {
+            put(UInt32(bad), &image, block, 24 + pair * 8)
+            put(UInt32(good), &image, block, 28 + pair * 8)
+        }
+        seal(&image, block, longs: 6 + 2 * pairs.count)
+    }
+    put(lists.isEmpty ? 0xFFFF_FFFF : UInt32(first), &image, 0, 24) // rdb_BadBlockList
+    seal(&image, 0)
+}
+
+@Test func badBlocksAreReadAndWrittenThroughTheirReplacements() throws {
+    var image = rigidDisk(twoPartitions)
+    addBadBlocks([[(100, 600), (101, 601), (7, 7)], [(200, 602), (5000, 603)]], to: &image)
+    let disk = try HardDisk(image: image)
+    #expect(disk.badBlocks == [100: 600, 101: 601, 200: 602]) // no self-mapping or block off the disk
+    func blocks(_ numbers: [Int]) -> [UInt8] { numbers.flatMap { image[$0 * 512..<($0 + 1) * 512] } }
+    #expect(Array(disk.read(at: 99 * 512, count: 4 * 512)) == blocks([99, 600, 601, 102]))
+    #expect(Array(disk.read(at: 100 * 512 + 10, count: 20)) == Array(image[600 * 512 + 10..<600 * 512 + 30]))
+    #expect(Array(disk.read(at: 50 * 512, count: 512)) == blocks([50]))
+
+    let data = (0..<3 * 512).map { UInt8(truncatingIfNeeded: $0 &* 7) }
+    disk.write(data, at: 199 * 512)
+    #expect(disk.takeModifiedBlocks() == [199, 201, 602])
+    #expect(Array(disk.bytes[602 * 512..<603 * 512]) == Array(data[512..<1024]))
+    #expect(Array(disk.bytes[200 * 512..<201 * 512]) == blocks([200])) // the bad block itself is untouched
+    #expect(Array(disk.read(at: 199 * 512, count: 3 * 512)) == data)
+
+    // A damaged BADB block ends the list; the disk stays usable.
+    var damaged = image
+    damaged[6 * 512 + 30] ^= 1
+    #expect(try HardDisk(image: damaged).badBlocks == [100: 600, 101: 601])
+    #expect(try HardDisk(image: rigidDisk(twoPartitions)).badBlocks.isEmpty)
+}
