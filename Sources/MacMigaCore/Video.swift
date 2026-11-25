@@ -84,11 +84,13 @@ extension AmigaMemory {
             if lineEnded {
                 lines += 1
                 renderLine(line)
+                updateSprites(line)
             }
             if frameEnded {
                 frames += 1
                 video.frameCount += 1
                 copper.jump(to: custom.copperLocation(1))
+                for index in 0..<8 { custom.sprites[index].dma = .idle }
             }
         }
         return (lines, frames)
@@ -126,6 +128,73 @@ extension AmigaMemory {
                 } else if beam & mask >= position { // SKIP
                     copper.programCounter = (copper.programCounter &+ 4) & 0x1F_FFFE
                 }
+            }
+        }
+    }
+
+    /// First line on which Agnus fetches sprite control words (end of PAL vertical blank).
+    static let firstSpriteLine = 25
+
+    /// Sprite DMA for `line` (control words on the first line and at VSTOP, data words
+    /// between VSTART and VSTOP), then draws armed sprites over the line. Sprites are
+    /// always drawn in front of the playfields (BPLCON2 priorities and collisions are not
+    /// modelled) and clipped to the horizontal display window.
+    private mutating func updateSprites(_ line: Int) {
+        if custom.dmacon & 0x0220 == 0x0220 {
+            for index in 0..<8 {
+                var sprite = custom.sprites[index]
+                var pointer = custom.spritePointers[index]
+                func fetchControl() {
+                    sprite.position = chipWord(at: pointer)
+                    sprite.control = chipWord(at: pointer &+ 2)
+                    sprite.armed = false
+                    sprite.dma = .waiting
+                    pointer = (pointer &+ 4) & 0x1F_FFFE
+                }
+                if line == Self.firstSpriteLine && sprite.dma == .idle { fetchControl() }
+                if sprite.dma == .waiting && line == sprite.verticalStart && line > Self.firstSpriteLine {
+                    sprite.dma = .active
+                }
+                if sprite.dma == .active {
+                    if line == sprite.verticalStop {
+                        fetchControl()
+                    } else {
+                        sprite.dataA = chipWord(at: pointer)
+                        sprite.dataB = chipWord(at: pointer &+ 2)
+                        sprite.armed = true
+                        pointer = (pointer &+ 4) & 0x1F_FFFE
+                    }
+                }
+                custom.sprites[index] = sprite
+                custom.spritePointers[index] = pointer
+            }
+        }
+        let sprites = custom.sprites
+        guard sprites.contains(where: { $0.armed }) else { return }
+        typealias R = CustomChips.Register
+        let diwStart = custom.register(R.diwstrt), diwStop = custom.register(R.diwstop)
+        let left = Int(diwStart & 0xFF), right = Int(diwStop & 0xFF) | 0x100
+        for index in stride(from: 7, through: 0, by: -1) where sprites[index].armed {
+            let sprite = sprites[index]
+            let pair = index & ~1
+            let attached = index & 1 == 1 ? sprite.attached : sprites[index | 1].attached && sprites[index | 1].armed
+            if attached && index & 1 == 1 { continue } // drawn together with its even partner
+            let partner = sprites[index | 1]
+            for pixel in 0..<16 {
+                let shift = UInt16(15 - pixel)
+                var value = Int(sprite.dataA >> shift & 1) | Int(sprite.dataB >> shift & 1) << 1
+                if attached {
+                    value |= Int(partner.dataA >> shift & 1) << 2 | Int(partner.dataB >> shift & 1) << 3
+                }
+                guard value != 0 else { continue }
+                let x = sprite.horizontalStart + pixel
+                guard x >= left, x < right else { continue }
+                let column = (x - Video.firstLowresColumn) * 2
+                guard column >= 0, column + 1 < Video.width else { continue }
+                let colorIndex = attached ? 16 + value : 16 + pair * 2 + value
+                let color = Video.argb(custom.register(R.color00 + colorIndex * 2) & 0xFFF)
+                video.set(row: line, column: column, color)
+                video.set(row: line, column: column + 1, color)
             }
         }
     }

@@ -36,6 +36,8 @@ public struct CIA8520: Equatable, Sendable {
     private var todHalted = false
 
     public private(set) var serialData: UInt8 = 0
+    /// Times CRA SPMODE (bit 6) went from output back to input: the keyboard handshake.
+    public private(set) var serialHandshakes = 0
     public private(set) var interruptData: UInt8 = 0
     public private(set) var interruptMask: UInt8 = 0
 
@@ -105,6 +107,7 @@ public struct CIA8520: Equatable, Sendable {
                 interruptMask &= ~(value & 0x1F)
             }
         case 0xE:
+            if controlA & 0x40 != 0 && value & 0x40 == 0 { serialHandshakes += 1 }
             if value & 0x10 != 0 { timerA = latchA }
             controlA = value & ~0x10
         case 0xF:
@@ -133,6 +136,12 @@ public struct CIA8520: Equatable, Sendable {
         if count(&timerB, latch: latchB, control: &controlB, ticks: ticksB) > 0 {
             interruptData |= Interrupt.timerB
         }
+    }
+
+    /// A byte shifted in from the serial port (CIA-A: the keyboard); raises the SP interrupt.
+    public mutating func receiveSerial(_ byte: UInt8) {
+        serialData = byte
+        interruptData |= Interrupt.serial
     }
 
     /// One TOD input pulse (CIA-A: vertical sync, CIA-B: horizontal sync).

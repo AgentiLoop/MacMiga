@@ -12,6 +12,7 @@ public struct CustomChips: Equatable, Sendable {
         public static let intenar = 0x01C, intreqr = 0x01E
         public static let dmacon = 0x096, intena = 0x09A, intreq = 0x09C, adkcon = 0x09E
         public static let dskpth = 0x020, dsklen = 0x024, dsksync = 0x07E
+        public static let joytest = 0x036, spr0pth = 0x120, spr0pos = 0x140
         public static let copcon = 0x02E, cop1lch = 0x080, cop2lch = 0x084
         public static let copjmp1 = 0x088, copjmp2 = 0x08A
         public static let diwstrt = 0x08E, diwstop = 0x090, ddfstrt = 0x092, ddfstop = 0x094
@@ -45,6 +46,15 @@ public struct CustomChips: Equatable, Sendable {
     public internal(set) var blitPending = false
     /// DMACONR BZERO: the last blit produced only zero D data.
     var blitterZero = false
+    /// Sprite DMA pointers SPR0PT–SPR7PT and per-sprite Denise state.
+    public internal(set) var spritePointers = [UInt32](repeating: 0, count: 8)
+    public internal(set) var sprites = [Sprite](repeating: Sprite(), count: 8)
+    /// Mouse counters in port 1 (JOY0DAT) and joystick direction lines in port 2 (JOY1DAT).
+    public private(set) var mouseX: UInt8 = 0
+    public private(set) var mouseY: UInt8 = 0
+    public var joystick1 = Joystick()
+    /// Right mouse button in port 1 (POTGOR DATLY, bit 10, active low).
+    public var rightMouseButton = false
     /// Disk DMA pointer DSKPT.
     public internal(set) var diskPointer: UInt32 = 0
     /// DSKLEN was written once with DMAEN; a second such write starts the transfer.
@@ -71,10 +81,12 @@ public struct CustomChips: Equatable, Sendable {
         case Register.vposr: return UInt16(verticalPosition >> 8) & 0x0001 // PAL OCS Agnus ID 0, LOF 0
         case Register.vhposr: return UInt16(verticalPosition & 0xFF) << 8 | UInt16(horizontalPosition & 0xFF)
         case Register.adkconr: return adkcon
-        case Register.potgor: return 0xFF00 // pull-ups: right mouse/fire buttons released
+        case Register.potgor: return 0xFF00 & ~(rightMouseButton ? 0x0400 : 0) // pull-ups when released
         case Register.intenar: return intena
         case Register.intreqr: return intreq
-        case Register.joy0dat, Register.joy1dat, Register.serdatr, Register.dskbytr: return 0
+        case Register.joy0dat: return UInt16(mouseY) << 8 | UInt16(mouseX)
+        case Register.joy1dat: return joystick1.data
+        case Register.serdatr, Register.dskbytr: return 0
         default: return 0 // write-only strobe/data registers; real hardware returns bus noise
         }
     }
@@ -90,6 +102,23 @@ public struct CustomChips: Equatable, Sendable {
         case Register.copjmp1: copperJump = 1
         case Register.copjmp2: copperJump = 2
         case Register.bltsize: blitPending = true
+        case Register.joytest:
+            mouseY = (mouseY & 3) | UInt8(value >> 8) & 0xFC
+            mouseX = (mouseX & 3) | UInt8(value & 0xFC)
+        case Register.spr0pth...(Register.spr0pth + 0x1E):
+            let sprite = (register - Register.spr0pth) >> 2
+            let pointer = spritePointers[sprite]
+            spritePointers[sprite] = register & 2 == 0
+                ? (pointer & 0xFFFF) | UInt32(value & 0x001F) << 16
+                : (pointer & 0x1F_0000) | UInt32(value & 0xFFFE)
+        case Register.spr0pos...(Register.spr0pos + 0x3E):
+            let sprite = (register - Register.spr0pos) >> 3
+            switch register & 6 {
+            case 0: sprites[sprite].position = value
+            case 2: sprites[sprite].control = value; sprites[sprite].armed = false
+            case 4: sprites[sprite].dataA = value; sprites[sprite].armed = true
+            default: sprites[sprite].dataB = value
+            }
         case Register.dskpth, Register.dskpth + 2:
             diskPointer = register & 2 == 0
                 ? (diskPointer & 0xFFFF) | UInt32(value & 0x001F) << 16
@@ -123,6 +152,12 @@ public struct CustomChips: Equatable, Sendable {
     /// Paula/Agnus raise interrupt request bits (e.g. VERTB = bit 5).
     public mutating func requestInterrupt(bits: UInt16) {
         intreq |= bits & 0x3FFF
+    }
+
+    /// Moves the mouse in port 1 by host-supplied counts (counters wrap at 8 bits).
+    public mutating func moveMouse(dx: Int, dy: Int) {
+        mouseX = UInt8(truncatingIfNeeded: Int(mouseX) + dx)
+        mouseY = UInt8(truncatingIfNeeded: Int(mouseY) + dy)
     }
 
     /// Value of a register as last written by the CPU or Copper.
@@ -163,5 +198,39 @@ public struct CustomChips: Equatable, Sendable {
     private static func setClear(_ register: inout UInt16, _ value: UInt16, mask: UInt16) {
         let bits = value & mask & 0x7FFF
         if value & 0x8000 != 0 { register |= bits } else { register &= ~bits }
+    }
+}
+
+/// One hardware sprite as seen by Denise: position/control words, current data, and the
+/// DMA state Agnus keeps for it.
+public struct Sprite: Equatable, Sendable {
+    public enum DMAState: Equatable, Sendable { case idle, waiting, active }
+    public internal(set) var position: UInt16 = 0
+    public internal(set) var control: UInt16 = 0
+    public internal(set) var dataA: UInt16 = 0
+    public internal(set) var dataB: UInt16 = 0
+    /// Writing DATA arms the sprite; writing CTL disarms it.
+    public internal(set) var armed = false
+    public internal(set) var dma = DMAState.idle
+
+    public var verticalStart: Int { Int(position >> 8) | Int(control & 0x04) << 6 }
+    public var verticalStop: Int { Int(control >> 8) | Int(control & 0x02) << 7 }
+    /// Lowres horizontal position (same coordinates as DIWSTRT/DIWSTOP).
+    public var horizontalStart: Int { Int(position & 0xFF) << 1 | Int(control & 0x01) }
+    public var attached: Bool { control & 0x80 != 0 }
+}
+
+/// Joystick direction lines encoded as JOYxDAT: right sets bit 1, left bit 9; down and
+/// up are XORed into bits 0 and 8.
+public struct Joystick: Equatable, Sendable {
+    public var up = false, down = false, left = false, right = false
+    public init() {}
+    var data: UInt16 {
+        var value: UInt16 = 0
+        if right { value |= 0x0002 }
+        if left { value |= 0x0200 }
+        if down != right { value |= 0x0001 }
+        if up != left { value |= 0x0100 }
+        return value
     }
 }

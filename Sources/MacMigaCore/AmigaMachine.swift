@@ -18,6 +18,10 @@ public struct AmigaMachine {
     public private(set) var clock: UInt64 = 0
     private var colorClockRemainder = 0
     private var eClockRemainder = 0
+    /// Raw keyboard codes (bit 7 = key up) waiting to be sent to CIA-A.
+    private var keyQueue: [UInt8] = []
+    private var keyboardHandshakes = 0
+    private var keyboardSentAt: UInt64?
 
     public init(kickstart: [UInt8], slowRAMSize: Int = 512 * 1024) throws {
         memory = try AmigaMemory(kickstart: kickstart, slowRAMSize: slowRAMSize)
@@ -34,6 +38,40 @@ public struct AmigaMachine {
         advance(cpuClocks: stopped ? Self.clocksPerStoppedStep : Self.clocksPerInstruction)
     }
 
+    /// Queues an Amiga raw key code (e.g. `$45` Esc, `$40` Space) press or release.
+    public mutating func key(_ code: UInt8, pressed: Bool) {
+        keyQueue.append(code & 0x7F | (pressed ? 0 : 0x80))
+    }
+
+    /// Mouse in port 1: motion counts and buttons (left = CIA-A /FIR0, right = POTGOR DATLY).
+    public mutating func mouse(dx: Int = 0, dy: Int = 0, left: Bool, right: Bool) {
+        memory.custom.moveMouse(dx: dx, dy: dy)
+        memory.custom.rightMouseButton = right
+        memory.ciaA.inputA = left ? memory.ciaA.inputA & ~0x40 : memory.ciaA.inputA | 0x40
+    }
+
+    /// Joystick in port 2: directions in JOY1DAT, fire = CIA-A /FIR1.
+    public mutating func joystick(_ state: Joystick, fire: Bool) {
+        memory.custom.joystick1 = state
+        memory.ciaA.inputA = fire ? memory.ciaA.inputA & ~0x80 : memory.ciaA.inputA | 0x80
+    }
+
+    /// Sends the next queued key once the previous byte was acknowledged by the CIA-A
+    /// SPMODE handshake, or after the keyboard's 143 ms timeout. The byte on the wire is
+    /// the code rotated left one bit and inverted, as the keyboard transmits it.
+    private mutating func serviceKeyboard() {
+        if let sentAt = keyboardSentAt {
+            let acknowledged = memory.ciaA.serialHandshakes != keyboardHandshakes
+            guard acknowledged || clock - sentAt > UInt64(Self.cpuClock / 7) else { return }
+            keyboardSentAt = nil
+        }
+        guard !keyQueue.isEmpty, memory.ciaA.controlA & 0x40 == 0 else { return }
+        let raw = keyQueue.removeFirst()
+        memory.ciaA.receiveSerial(~(raw << 1 | raw >> 7))
+        keyboardHandshakes = memory.ciaA.serialHandshakes
+        keyboardSentAt = clock
+    }
+
     /// Advances beam, TOD inputs and CIA timers, then routes CIA interrupts into INTREQ.
     public mutating func advance(cpuClocks: Int) {
         clock += UInt64(cpuClocks)
@@ -48,6 +86,7 @@ public struct AmigaMachine {
             memory.ciaB.tick(eClocks: eClockRemainder / 10)
             eClockRemainder %= 10
         }
+        serviceKeyboard()
         if memory.ciaA.interruptRequested { memory.custom.requestInterrupt(bits: 0x0008) }
         if memory.ciaB.interruptRequested { memory.custom.requestInterrupt(bits: 0x2000) }
     }
