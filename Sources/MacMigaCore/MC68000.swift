@@ -2,7 +2,7 @@ public enum CPUError: Error, Equatable {
     case unsupportedInstruction(opcode: UInt16, address: UInt32)
 }
 
-/// Functional MC68000 subset; no prefetch, cycle accounting, interrupts, or exceptions yet.
+/// Functional MC68000 subset; no prefetch or cycle accounting.
 public struct MC68000: Equatable, Sendable {
     private var dataRegisters = [UInt32](repeating: 0, count: 8)
     private var addressRegisters = [UInt32](repeating: 0, count: 7)
@@ -10,6 +10,8 @@ public struct MC68000: Equatable, Sendable {
     public var programCounter: UInt32 = 0
     public var userStackPointer: UInt32 = 0
     public var supervisorStackPointer: UInt32 = 0
+    /// Set by STOP; the CPU executes nothing until an accepted interrupt clears it.
+    public private(set) var isStopped = false
 
     /// Deterministic host initialization, not a claim about hardware power-on register values.
     public init() {}
@@ -59,13 +61,29 @@ public struct MC68000: Equatable, Sendable {
     /// are detected by the next instruction fetch, since prefetch is not modeled.
     /// Group 1/2 exceptions (TRAP, privilege violation, divide by zero, illegal, line A/F)
     /// are processed by pushing PC and SR on the supervisor stack and jumping through the
-    /// vector table. Bus/address errors, trace and interrupts are not modelled yet.
+    /// vector table. Bus/address errors and trace are not modelled yet; see `interrupt(level:memory:)`.
     public mutating func step(memory: inout AmigaMemory) throws {
+        guard !isStopped else { return }
         do {
             try execute(memory: &memory)
         } catch let trap as Trap {
             try enterException(vector: trap.vector, returnAddress: trap.returnAddress, memory: &memory)
         }
+    }
+
+    /// Presents an autovectored interrupt at `level` (1–7). It is accepted when the level is 7
+    /// or above the SR interrupt mask: SR and PC are stacked, the mask is raised to `level`,
+    /// STOP is ended and execution continues at vector 24 + level. Returns whether accepted.
+    /// Level 7 is treated as level-sensitive here; real hardware makes it edge-triggered.
+    @discardableResult
+    public mutating func interrupt(level: Int, memory: inout AmigaMemory) throws -> Bool {
+        guard (1...7).contains(level), level == 7 || level > Int((status >> 8) & 7) else { return false }
+        var next = self
+        next.isStopped = false
+        try next.enterException(vector: 24 + level, returnAddress: programCounter, memory: &memory)
+        next.status = (next.status & 0xF8FF) | UInt16(level) << 8
+        self = next
+        return true
     }
 
     /// Pending exception raised by an instruction; CPU state is untouched when it is thrown.
@@ -347,8 +365,10 @@ public struct MC68000: Equatable, Sendable {
             throw Trap(vector: 4, returnAddress: instructionAddress)
         case 0x4E70: // RESET: privileged; resetting external devices is not modelled yet.
             guard supervisor else { throw privilege }
-        case 0x4E72: // STOP needs interrupt support.
-            throw unsupported
+        case 0x4E72: // STOP #imm: load SR and wait for an interrupt.
+            guard supervisor else { throw privilege }
+            statusRegister = try extensionWord(cursor: &cursor, memory: &memory)
+            isStopped = true
         case 0x4E73: // RTE
             guard supervisor else { throw privilege }
             let stackPointer = supervisorStackPointer
