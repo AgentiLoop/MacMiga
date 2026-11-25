@@ -77,7 +77,7 @@ public struct MC68000: Equatable, Sendable {
             var cursor = nextWord
             // These control modes compute an address without reading it or changing An.
             guard case .memory(let target) = try next.moveOperand(
-                mode: mode, register: register, size: 4, cursor: &cursor, memory: memory
+                mode: mode, register: register, size: 4, cursor: &cursor, memory: &memory
             ) else {
                 preconditionFailure("Control addressing was validated before decoding")
             }
@@ -184,14 +184,14 @@ public struct MC68000: Equatable, Sendable {
         var source: UInt32
         let destination: UInt32
         if immediateForm {
-            let high = try extensionWord(cursor: &cursor, memory: memory)
+            let high = try extensionWord(cursor: &cursor, memory: &memory)
             source = size == 1 ? UInt32(high & 0xFF) : UInt32(high)
-            if size == 4 { source = source << 16 | UInt32(try extensionWord(cursor: &cursor, memory: memory)) }
-            let operand = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
-            destination = try read(operand, size: size, memory: memory)
+            if size == 4 { source = source << 16 | UInt32(try extensionWord(cursor: &cursor, memory: &memory)) }
+            let operand = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: &memory)
+            destination = try read(operand, size: size, memory: &memory)
         } else {
-            let operand = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
-            source = try read(operand, size: size, memory: memory)
+            let operand = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: &memory)
+            source = try read(operand, size: size, memory: &memory)
             let upper = Int((opcode >> 9) & 7)
             if opmode == 3 || opmode == 7 { // CMPA compares all 32 bits of An
                 if size == 2 { source = Self.signExtendWord(UInt16(source)) }
@@ -242,13 +242,13 @@ public struct MC68000: Equatable, Sendable {
         let target: MoveOperand
         if quick {
             source = UInt32(upper == 0 ? 8 : upper)
-            target = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
+            target = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: &memory)
         } else if toEffectiveAddress {
             source = self[data: upper] & mask
-            target = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
+            target = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: &memory)
         } else {
-            let operand = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
-            source = try read(operand, size: size, memory: memory)
+            let operand = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: &memory)
+            source = try read(operand, size: size, memory: &memory)
             target = addressForm ? .address(upper) : .data(upper)
         }
 
@@ -260,7 +260,7 @@ public struct MC68000: Equatable, Sendable {
             return
         }
 
-        let destination = try read(target, size: size, memory: memory)
+        let destination = try read(target, size: size, memory: &memory)
         let result = (subtract ? destination &- source : destination &+ source) & mask
         let sign = UInt32(1) << (size * 8 - 1)
         let carry = subtract ? source > destination : result < destination
@@ -276,7 +276,7 @@ public struct MC68000: Equatable, Sendable {
         programCounter = cursor
     }
 
-    private func read(_ operand: MoveOperand, size: Int, memory: AmigaMemory) throws -> UInt32 {
+    private func read(_ operand: MoveOperand, size: Int, memory: inout AmigaMemory) throws -> UInt32 {
         let mask: UInt32 = size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFF_FFFF
         switch operand {
         case .data(let register): return self[data: register] & mask
@@ -322,7 +322,7 @@ public struct MC68000: Equatable, Sendable {
         var cursor = programCounter &+ 2
         let mask: UInt32 = size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFF_FFFF
         let source = try moveOperand(mode: sourceMode, register: sourceRegister,
-                                     size: size, cursor: &cursor, memory: memory)
+                                     size: size, cursor: &cursor, memory: &memory)
         let value: UInt32
         switch source {
         case .data(let register): value = self[data: register] & mask
@@ -338,7 +338,7 @@ public struct MC68000: Equatable, Sendable {
 
         // Source updates precede destination decoding, including shared address registers.
         let destination = try moveOperand(mode: destinationMode, register: destinationRegister,
-                                          size: size, cursor: &cursor, memory: memory)
+                                          size: size, cursor: &cursor, memory: &memory)
         switch destination {
         case .data(let register):
             self[data: register] = (self[data: register] & ~mask) | value
@@ -365,15 +365,15 @@ public struct MC68000: Equatable, Sendable {
         UInt32(bitPattern: Int32(Int16(bitPattern: word)))
     }
 
-    private func extensionWord(cursor: inout UInt32, memory: AmigaMemory) throws -> UInt16 {
+    private func extensionWord(cursor: inout UInt32, memory: inout AmigaMemory) throws -> UInt16 {
         let word = try memory.readWord(at: cursor)
         cursor &+= 2
         return word
     }
 
     private func indexedAddress(base: UInt32, cursor: inout UInt32,
-                                memory: AmigaMemory) throws -> UInt32 {
-        let word = try extensionWord(cursor: &cursor, memory: memory)
+                                memory: inout AmigaMemory) throws -> UInt32 {
+        let word = try extensionWord(cursor: &cursor, memory: &memory)
         let register = Int((word >> 12) & 7)
         var index = word & 0x8000 == 0 ? self[data: register] : self[address: register]
         if word & 0x0800 == 0 { index = Self.signExtendWord(UInt16(truncatingIfNeeded: index)) }
@@ -384,7 +384,7 @@ public struct MC68000: Equatable, Sendable {
 
     /// Called only after MOVE's source and destination mode legality has been checked.
     private mutating func moveOperand(mode: Int, register: Int, size: Int,
-                                      cursor: inout UInt32, memory: AmigaMemory) throws -> MoveOperand {
+                                      cursor: inout UInt32, memory: inout AmigaMemory) throws -> MoveOperand {
         let increment = UInt32(size == 1 && register == 7 ? 2 : size)
         switch mode {
         case 0: return .data(register)
@@ -398,29 +398,29 @@ public struct MC68000: Equatable, Sendable {
             self[address: register] &-= increment
             return .memory(self[address: register])
         case 5:
-            let displacement = try Self.signExtendWord(extensionWord(cursor: &cursor, memory: memory))
+            let displacement = try Self.signExtendWord(extensionWord(cursor: &cursor, memory: &memory))
             return .memory(self[address: register] &+ displacement)
         case 6:
-            return try .memory(indexedAddress(base: self[address: register], cursor: &cursor, memory: memory))
+            return try .memory(indexedAddress(base: self[address: register], cursor: &cursor, memory: &memory))
         default:
             switch register {
             case 0:
-                return try .memory(Self.signExtendWord(extensionWord(cursor: &cursor, memory: memory)))
+                return try .memory(Self.signExtendWord(extensionWord(cursor: &cursor, memory: &memory)))
             case 1:
-                let high = try extensionWord(cursor: &cursor, memory: memory)
-                let low = try extensionWord(cursor: &cursor, memory: memory)
+                let high = try extensionWord(cursor: &cursor, memory: &memory)
+                let low = try extensionWord(cursor: &cursor, memory: &memory)
                 return .memory(UInt32(high) << 16 | UInt32(low))
             case 2:
                 let base = cursor
-                let displacement = try Self.signExtendWord(extensionWord(cursor: &cursor, memory: memory))
+                let displacement = try Self.signExtendWord(extensionWord(cursor: &cursor, memory: &memory))
                 return .memory(base &+ displacement)
             case 3:
                 let base = cursor
-                return try .memory(indexedAddress(base: base, cursor: &cursor, memory: memory))
+                return try .memory(indexedAddress(base: base, cursor: &cursor, memory: &memory))
             case 4:
-                let high = try extensionWord(cursor: &cursor, memory: memory)
+                let high = try extensionWord(cursor: &cursor, memory: &memory)
                 if size != 4 { return .immediate(UInt32(high)) }
-                let low = try extensionWord(cursor: &cursor, memory: memory)
+                let low = try extensionWord(cursor: &cursor, memory: &memory)
                 return .immediate(UInt32(high) << 16 | UInt32(low))
             default:
                 preconditionFailure("MOVE mode was validated before decoding")

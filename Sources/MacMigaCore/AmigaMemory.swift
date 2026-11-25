@@ -9,13 +9,20 @@ public struct ResetVectors: Equatable, Sendable {
     public let programCounter: UInt32
 }
 
-/// Initial CPU-side memory subset. Peripheral decoding and bus timing are not implemented.
+/// CPU-side memory map subset with both CIAs. Custom chips and bus timing are not implemented.
 public struct AmigaMemory {
     public static let chipRAMSize = 512 * 1024
     private static let addressMask: UInt32 = 0x00FF_FFFF
     private let kickstart: [UInt8]
     private var chipRAM = [UInt8](repeating: 0, count: chipRAMSize)
-    public private(set) var overlayEnabled = true
+    /// CIA-A (odd bytes, selected by A12 low): OVL/LED/disk/fire inputs, keyboard.
+    public var ciaA = CIA8520()
+    /// CIA-B (even bytes, selected by A13 low): serial/parallel control, disk drive outputs.
+    public var ciaB = CIA8520()
+
+    /// ROM overlay follows CIA-A PA0 (OVL). The line is pulled up, so it is active
+    /// while PA0 is still an input after reset.
+    public var overlayEnabled: Bool { ciaA.outputA & 0x01 != 0 }
 
     /// Accepts a raw, unencrypted 256 KiB or 512 KiB ROM supplied by the caller.
     /// Size validation does not establish that the image is a valid Kickstart ROM.
@@ -26,15 +33,17 @@ public struct AmigaMemory {
         self.kickstart = kickstart
     }
 
-    /// Host hook until CIA-A's OVL output is implemented.
+    /// Host convenience: drives CIA-A PA0 as an output at the requested OVL level.
     public mutating func setOverlay(enabled: Bool) {
-        overlayEnabled = enabled
+        ciaA.directionA |= 0x01
+        ciaA.portA = enabled ? ciaA.portA | 0x01 : ciaA.portA & ~0x01
     }
 
-    /// Restores the ROM overlay without clearing RAM, then fetches the CPU reset vectors.
-    /// This is not an implementation of the CPU's RESET instruction.
+    /// Resets both CIAs (restoring the overlay) without clearing RAM, then fetches
+    /// the CPU reset vectors. This is not an implementation of the CPU's RESET instruction.
     public mutating func reset() throws -> ResetVectors {
-        overlayEnabled = true
+        ciaA = CIA8520()
+        ciaB = CIA8520()
         return try ResetVectors(
             supervisorStackPointer: readLong(at: 0),
             programCounter: readLong(at: 4)
@@ -48,7 +57,14 @@ public struct AmigaMemory {
         physical >= 0xF0_0000 && physical < 0xF8_0000
     }
 
-    public func readByte(at address: UInt32) throws -> UInt8 {
+    /// `$A00000`–`$BFFFFF` selects the CIAs: register = A8–A11; CIA-A answers odd bytes
+    /// when A12 is low, CIA-B even bytes when A13 is low. An unselected byte lane reads
+    /// as `$FF` here (real hardware: open bus).
+    private static func isCIARange(_ physical: UInt32) -> Bool {
+        physical >= 0xA0_0000 && physical < 0xC0_0000
+    }
+
+    public mutating func readByte(at address: UInt32) throws -> UInt8 {
         let physical = address & Self.addressMask
         if physical >= 0xF8_0000 {
             return kickstart[Int(physical - 0xF8_0000) % kickstart.count]
@@ -60,6 +76,13 @@ public struct AmigaMemory {
             return chipRAM[Int(physical)]
         }
         if Self.isEmptyDiagnosticSlot(physical) { return 0 }
+        if Self.isCIARange(physical) {
+            let register = Int(physical >> 8) & 0xF
+            if physical & 1 != 0 {
+                return physical & 0x1000 == 0 ? ciaA.read(register: register) : 0xFF
+            }
+            return physical & 0x2000 == 0 ? ciaB.read(register: register) : 0xFF
+        }
         throw MemoryBusError.unmappedAddress(physical)
     }
 
@@ -70,17 +93,26 @@ public struct AmigaMemory {
             if !overlayEnabled { chipRAM[Int(physical)] = value }
             return
         }
+        if Self.isCIARange(physical) {
+            let register = Int(physical >> 8) & 0xF
+            if physical & 1 != 0 {
+                if physical & 0x1000 == 0 { ciaA.write(register: register, value: value) }
+            } else if physical & 0x2000 == 0 {
+                ciaB.write(register: register, value: value)
+            }
+            return
+        }
         throw MemoryBusError.unmappedAddress(physical)
     }
 
-    public func readWord(at address: UInt32) throws -> UInt16 {
+    public mutating func readWord(at address: UInt32) throws -> UInt16 {
         try checkAlignment(address)
         let high = try readByte(at: address)
         let low = try readByte(at: address &+ 1)
         return UInt16(high) << 8 | UInt16(low)
     }
 
-    public func readLong(at address: UInt32) throws -> UInt32 {
+    public mutating func readLong(at address: UInt32) throws -> UInt32 {
         let high = try readWord(at: address)
         let low = try readWord(at: address &+ 2)
         return UInt32(high) << 16 | UInt32(low)

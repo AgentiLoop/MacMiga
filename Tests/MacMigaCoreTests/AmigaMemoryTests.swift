@@ -30,7 +30,7 @@ private func syntheticROM(size: Int = 256 * 1024) -> [UInt8] {
 }
 
 @Test func mirrors256KiBROMInBothWindows() throws {
-    let memory = try AmigaMemory(kickstart: syntheticROM())
+    var memory = try AmigaMemory(kickstart: syntheticROM())
     #expect(try memory.readLong(at: 4) == 0x00FC_00D2)
     #expect(try memory.readLong(at: 0x04_0004) == 0x00FC_00D2)
     #expect(try memory.readLong(at: 0xF8_0004) == 0x00FC_00D2)
@@ -41,7 +41,7 @@ private func syntheticROM(size: Int = 256 * 1024) -> [UInt8] {
 @Test func preservesDistinctHalvesOf512KiBROM() throws {
     var rom = syntheticROM(size: 512 * 1024)
     rom[0x04_0000] = 0x7E
-    let memory = try AmigaMemory(kickstart: rom)
+    var memory = try AmigaMemory(kickstart: rom)
     #expect(try memory.readByte(at: 0xF8_0000) == 0)
     #expect(try memory.readByte(at: 0xFC_0000) == 0x7E)
     #expect(try memory.readByte(at: 0x04_0000) == 0x7E)
@@ -110,7 +110,7 @@ private func syntheticROM(size: Int = 256 * 1024) -> [UInt8] {
 @Test func reportsUnimplementedRegionsRatherThanInventingDeviceData() throws {
     var memory = try AmigaMemory(kickstart: syntheticROM())
     memory.setOverlay(enabled: false)
-    for address: UInt32 in [0x08_0000, 0xBF_E001, 0xDF_F000, 0xEF_FFFF] {
+    for address: UInt32 in [0x08_0000, 0x9F_FFFF, 0xC0_0000, 0xDF_F000, 0xEF_FFFF] {
         #expect(throws: MemoryBusError.unmappedAddress(address)) { try memory.readByte(at: address) }
         #expect(throws: MemoryBusError.unmappedAddress(address)) { try memory.writeByte(0xFF, at: address) }
     }
