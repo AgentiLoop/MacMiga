@@ -18,11 +18,14 @@ final class Emulator {
     private(set) var hardDiskURL: URL?
     /// 8 MiB of Zorro II fast RAM, off by default (the stock machine is 512 KiB chip + 512 KiB slow).
     private(set) var fastRAM = UserDefaults.standard.bool(forKey: "FastRAM")
+    /// 1 MiB of chip RAM with the ECS Agnus instead of 512 KiB with the OCS one; off by default.
+    private(set) var bigChipRAM = UserDefaults.standard.bool(forKey: "ChipRAM1MB")
     var onError: ((String) -> Void)?
     let audio = AudioOutput()
 
     func load(rom url: URL) throws {
         var machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)),
+                                       chipRAMSize: bigChipRAM ? 1 << 20 : 512 << 10,
                                        fastRAMSize: fastRAM ? 8 << 20 : 0, hardDisk: hardDisk)
         if let audio { machine.memory.audio.sampleRate = audio.sampleRate }
         self.machine = machine
@@ -66,6 +69,12 @@ final class Emulator {
     func setFastRAM(_ enabled: Bool) throws {
         fastRAM = enabled
         UserDefaults.standard.set(enabled, forKey: "FastRAM")
+        try reset()
+    }
+
+    func setBigChipRAM(_ enabled: Bool) throws {
+        bigChipRAM = enabled
+        UserDefaults.standard.set(enabled, forKey: "ChipRAM1MB")
         try reset()
     }
 
@@ -508,6 +517,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sender.state = emulator.fastRAM ? .on : .off
         view.updateJoystick()
     }
+    @objc func toggleBigChipRAM(_ sender: NSMenuItem) {
+        do { try emulator.setBigChipRAM(!emulator.bigChipRAM) } catch { alert("Reset failed: \(error)") }
+        sender.state = emulator.bigChipRAM ? .on : .off
+        view.updateJoystick()
+    }
     @objc func resetMachine() {
         do { try emulator.reset() } catch { alert("Reset failed: \(error)") }
         view.updateJoystick()
@@ -531,6 +545,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         machine.addItem(withTitle: "Detach Hard Disk", action: #selector(detachHardDisk), keyEquivalent: "")
         let fast = machine.addItem(withTitle: "8 MB Fast RAM", action: #selector(toggleFastRAM(_:)), keyEquivalent: "")
         fast.state = emulator.fastRAM ? .on : .off
+        let chip = machine.addItem(withTitle: "1 MB Chip RAM (ECS Agnus)", action: #selector(toggleBigChipRAM(_:)),
+                                   keyEquivalent: "")
+        chip.state = emulator.bigChipRAM ? .on : .off
         machine.addItem(.separator())
         machine.addItem(withTitle: "Reset", action: #selector(resetMachine), keyEquivalent: "r")
         machine.addItem(.separator())
