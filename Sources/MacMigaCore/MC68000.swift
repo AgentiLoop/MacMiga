@@ -67,6 +67,32 @@ public struct MC68000: Equatable, Sendable {
             var next = self
             try next.move(opcode, memory: &memory)
             self = next
+        case _ where opcode & 0xF1C0 == 0x41C0 || opcode & 0xFF80 == 0x4E80: // LEA / JSR / JMP
+            let mode = Int((opcode >> 3) & 7)
+            let register = Int(opcode & 7)
+            guard mode == 2 || mode == 5 || mode == 6 || (mode == 7 && register <= 3) else {
+                throw CPUError.unsupportedInstruction(opcode: opcode, address: instructionAddress)
+            }
+            var next = self
+            var cursor = nextWord
+            // These control modes compute an address without reading it or changing An.
+            guard case .memory(let target) = try next.moveOperand(
+                mode: mode, register: register, size: 4, cursor: &cursor, memory: memory
+            ) else {
+                preconditionFailure("Control addressing was validated before decoding")
+            }
+            if opcode & 0xF1C0 == 0x41C0 { // LEA
+                next[address: Int((opcode >> 9) & 7)] = target
+                next.programCounter = cursor
+            } else {
+                if opcode & 0xFFC0 == 0x4E80 { // JSR: resolve target before changing A7.
+                    let stackPointer = next[address: 7] &- 4
+                    try memory.writeLong(cursor, at: stackPointer)
+                    next[address: 7] = stackPointer
+                }
+                next.programCounter = target
+            }
+            self = next
         case 0x4E71: // NOP
             programCounter = nextWord
         case 0x4E75: // RTS
