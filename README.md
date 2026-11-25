@@ -5,9 +5,28 @@ A work-in-progress Commodore Amiga 500 emulator for macOS.
 **Current milestone: booting from ADF floppy images.** Both local Kickstart
 ROMs draw their insert-disk screens and boot a bootblock from an ADF disk image,
 which then reads further sectors through trackdisk.device. There is no
-application UI or audio yet; sprites, keyboard, mouse and joystick are emulated
-but only reachable through the core API. Booting real AmigaOS
+audio yet. The `MacMiga` app shows the emulated display in a window and
+forwards the Mac keyboard and mouse. Booting real AmigaOS
 Workbench disks or games has not been tested.
+
+## Run the app
+
+```sh
+swift run -c release MacMiga "Kickstart ROMs/kickstart-1.3.rom" [disk.adf]
+```
+
+With no arguments it reuses the last ROM, or `Kickstart ROMs/kickstart-1.3.rom`
+in the current folder, or asks for one. The Machine menu opens a Kickstart ROM
+(⌘K), inserts (⌘O) or ejects (⌘E) a DF0 ADF, and resets (⌘R). The window shows
+the full 736×312 frame doubled vertically, emulating one frame per 1/50 s timer
+tick on the main thread. Keys map by US-layout position to Amiga raw codes
+(Command → Amiga keys, Option → Alt, Page Up/Help → Help); Command-key shortcuts
+go to the menu instead, so the Amiga keys only work as plain modifiers. Mouse
+motion inside the window is sent as relative counts and the Mac cursor is not
+captured, so the Amiga pointer and Mac cursor are not aligned. No joystick
+mapping, audio, or settings yet. Verified on November 25, 2026 by launching it
+with Kickstart 3.1 and screen-capturing the window, which showed the
+insert-disk screen; keyboard and mouse input in the app were not tested by hand.
 
 ## Build and test
 
@@ -246,8 +265,8 @@ validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. A macOS app window: display the framebuffer, forward keyboard and mouse,
-   insert ADFs; then boot a real Workbench disk.
+1. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
+   what breaks; audio (Paula channels).
 2. Remaining CPU pieces: ABCD/SBCD/NBCD, CHK, MOVEP, bus/address errors, timing.
 3. OCS custom chips: sprites, DMA slot timing, and audio.
 4. Disk writes, extra drives, index pulses and accurate disk timing.
