@@ -19,6 +19,8 @@ public struct AmigaMemory {
     public var ciaA = CIA8520()
     /// CIA-B (even bytes, selected by A13 low): serial/parallel control, disk drive outputs.
     public var ciaB = CIA8520()
+    /// OCS custom chip registers, decoded at `$DFF000`–`$DFFFFF` (mirrored every `$200`).
+    public var custom = CustomChips()
 
     /// ROM overlay follows CIA-A PA0 (OVL). The line is pulled up, so it is active
     /// while PA0 is still an input after reset.
@@ -44,6 +46,7 @@ public struct AmigaMemory {
     public mutating func reset() throws -> ResetVectors {
         ciaA = CIA8520()
         ciaB = CIA8520()
+        custom = CustomChips()
         return try ResetVectors(
             supervisorStackPointer: readLong(at: 0),
             programCounter: readLong(at: 4)
@@ -60,6 +63,16 @@ public struct AmigaMemory {
     /// `$A00000`–`$BFFFFF` selects the CIAs: register = A8–A11; CIA-A answers odd bytes
     /// when A12 is low, CIA-B even bytes when A13 is low. An unselected byte lane reads
     /// as `$FF` here (real hardware: open bus).
+    /// `$D80000`–`$DFEFFF` holds no device on a stock A500 (no RTC, no Gayle/IDE);
+    /// reads return 0 and writes are ignored. Kickstart 3.1 probes the A600 Gayle here.
+    private static func isEmptyIORange(_ physical: UInt32) -> Bool {
+        physical >= 0xD8_0000 && physical < 0xDF_F000
+    }
+
+    private static func isCustomRange(_ physical: UInt32) -> Bool {
+        physical >= 0xDF_F000 && physical < 0xE0_0000
+    }
+
     private static func isCIARange(_ physical: UInt32) -> Bool {
         physical >= 0xA0_0000 && physical < 0xC0_0000
     }
@@ -83,6 +96,11 @@ public struct AmigaMemory {
             }
             return physical & 0x2000 == 0 ? ciaB.read(register: register) : 0xFF
         }
+        if Self.isCustomRange(physical) {
+            let word = custom.readWord(offset: Int(physical & 0x1FE))
+            return physical & 1 == 0 ? UInt8(word >> 8) : UInt8(truncatingIfNeeded: word)
+        }
+        if Self.isEmptyIORange(physical) { return 0 }
         throw MemoryBusError.unmappedAddress(physical)
     }
 
@@ -102,11 +120,19 @@ public struct AmigaMemory {
             }
             return
         }
+        if Self.isCustomRange(physical) {
+            // A byte write drives the same byte onto both halves of the 16-bit bus.
+            custom.writeWord(offset: Int(physical & 0x1FE), value: UInt16(value) << 8 | UInt16(value))
+            return
+        }
+        if Self.isEmptyIORange(physical) { return }
         throw MemoryBusError.unmappedAddress(physical)
     }
 
     public mutating func readWord(at address: UInt32) throws -> UInt16 {
         try checkAlignment(address)
+        let physical = address & Self.addressMask
+        if Self.isCustomRange(physical) { return custom.readWord(offset: Int(physical & 0x1FE)) }
         let high = try readByte(at: address)
         let low = try readByte(at: address &+ 1)
         return UInt16(high) << 8 | UInt16(low)
@@ -120,6 +146,11 @@ public struct AmigaMemory {
 
     public mutating func writeWord(_ value: UInt16, at address: UInt32) throws {
         try checkAlignment(address)
+        let physical = address & Self.addressMask
+        if Self.isCustomRange(physical) {
+            custom.writeWord(offset: Int(physical & 0x1FE), value: value)
+            return
+        }
         try writeByte(UInt8(truncatingIfNeeded: value >> 8), at: address)
         try writeByte(UInt8(truncatingIfNeeded: value), at: address &+ 1)
     }
