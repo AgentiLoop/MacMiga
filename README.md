@@ -36,9 +36,11 @@ emulated and played through the Mac's default output. The `MacMiga` app shows
 the emulated display in a window and forwards the Mac keyboard and mouse. Booting real AmigaOS
 Workbench disks has not been tested.
 
-**AROS:** the boot floppy of AROS, the free AmigaOS-compatible system, starts
-under Kickstart 3.1, restarts the machine into AROS's own ROM image, and reaches
-the AROS shell on an Intuition screen. See "AROS".
+**Desktop (AROS):** AROS, the free AmigaOS-compatible system, boots from its
+floppy under Kickstart 3.1 and, with the contents of its Live CD on a hard disk
+image, comes up with its desktop (Wanderer): volume icons, a pointer that
+follows the mouse, windows that open on a double-click and pull-down menus.
+See "AROS".
 
 **Hard disk:** a hard disk image (`.hdf`) can be attached: either a hardfile
 (one AmigaDOS partition, mounted as `DH0`) or a partitioned image with a Rigid
@@ -90,7 +92,10 @@ from Folder or LHA… asks for a folder or archive and for where to save the new
 `.hdf`, builds it and attaches it. Machine ▸ 8 MB Fast RAM
 adds a Zorro II memory board (off by default, remembered, restarts the machine).
 Machine ▸ 1 MB Chip RAM (ECS Agnus) doubles chip RAM and swaps the Agnus (same
-rules; see "Chip RAM and the ECS Agnus").
+rules; see "Chip RAM and the ECS Agnus"). Machine ▸ Warp Speed (⌘T) runs the
+emulation as fast as the Mac allows instead of at 50 frames a second, without
+sound, which shortens long loading times; the window title shows "warp". It is
+off at every launch unless the app is started with `-Warp YES`.
 
 With no arguments it reuses the last ROM, or `Kickstart ROMs/kickstart-1.3.rom`
 in the current folder, or asks for one. The Machine menu opens a Kickstart ROM
@@ -424,7 +429,7 @@ the 512 KiB machine. For software that needs the extra chip memory, see
 ## Making a hard disk
 
 ```sh
-swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... <folder | archive.lha>... <output.hdf>
+swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]... [--skip-long-names] <folder | archive.lha>... <output.hdf>
 swift run -c release MakeHardfile --list <folder | archive.lha>
 swift run -c release MakeHardfile --extract <archive.lha> <new folder>
 ```
@@ -442,7 +447,11 @@ source is taken from the last). `--startup` puts the given text in
 boots. Without a startup-sequence Kickstart 3.1 boots to a `1>` shell prompt.
 The volume is named after the first folder or archive unless `--name` is given, and
 has 2 MiB of free space, or a quarter of its contents if that is more, unless
-`--free` is given.
+`--free` is given. `--exclude PATH` leaves out a file or a directory with
+everything in it (the path counts from the top of a source, in any case, and
+the option can be repeated). `--skip-long-names` leaves out, and lists, the
+files and directories whose names an Amiga volume cannot hold, instead of
+stopping at the first one.
 
 `VolumeBuilder.swift` (`FastFileSystem.hardfile`) writes the volume: Fast File
 System (`DOS\1`), 512-byte blocks, root block in the middle, hash-table
@@ -537,10 +546,46 @@ swift run -c release MacMiga "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom" 
 Turn on Machine ▸ 8 MB Fast RAM or 1 MB Chip RAM first; the stock memory is
 too small. Kickstart boots the floppy, whose first command (`AROSBootstrap`)
 loads AROS's ROM image into RAM and restarts the machine into it. AROS then
-starts from the same floppy.
+starts from the same floppy and asks for its Live CD.
 
-Checked on November 25, 2026 with the probe and the boot floppy of the
-2026-11-24 nightly build:
+### The AROS desktop
+
+The desktop (Wanderer) and the rest of the system are on the Live CD,
+`AROS-<date>-amiga-m68k-boot-iso.zip` in the same download folder. MacMiga has
+no CD drive, but AROS accepts any volume named "AROS Live CD", so the CD's
+contents go on a hard disk image. Unzip the download, open the `.iso` so that
+macOS mounts it, and then:
+
+```sh
+swift run -c release MakeHardfile --name "AROS Live CD" --free 8 \
+    --exclude Developer --exclude Developer.info --skip-long-names \
+    /Volumes/<the mounted CD> aros-live.hdf
+swift run -c release MacMiga "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom" \
+    aros/*/bootdisk-amiga-m68k.adf aros-live.hdf
+```
+
+`Developer` (compilers and headers, three quarters of the CD, with file names
+too long for an Amiga volume) is left out; the image is then 122 MB.
+`--skip-long-names` leaves out ten font files whose names have 31 or 32
+characters. With 8 MB Fast RAM on, the desktop is there after about 130
+emulated seconds; Machine ▸ Warp Speed shortens the wait.
+
+Checked on November 25, 2026 with the probe, Kickstart 3.1, 8 MiB fast RAM, and
+the boot floppy and Live CD of the 2026-11-24 nightly build:
+
+| Step | Result |
+| --- | --- |
+| boot | by frame 4,500 AROS had its own screen; by frame 6,500 (130 s) the desktop was up: a title bar starting "Workbench", three volume icons, among them "RAM Disk" and "AROS Live CD", and the pointer in the top left corner. 5,597 blocks read from the hard disk, none written |
+| mouse moved by 60 and 30 counts | the pointer moved 60 pixels right and 30 lines down |
+| pointer moved onto the "AROS Live CD" icon, two clicks | the busy pointer appeared, and a window opened with three rows of drawer icons (1,302 more blocks read) |
+| right button held on the title bar, pointer pulled down | the menu bar appeared and its first menu, "Workbench", dropped down with its items |
+
+In the app, started with the same floppy and hard disk image, `-FastRAM YES`
+and `-Warp YES`, a capture of the window 45 seconds after launch showed the
+desktop. No emulator change was needed for the desktop beyond the two fixes
+below; the probe gained scripted mouse input to check it.
+
+Checked earlier the same day with the boot floppy alone:
 
 | Machine | Result |
 | --- | --- |
@@ -558,9 +603,11 @@ stayed configured, AROS never found it, and ended in its alert loop, blinking
 the background red, with `$8100000C` in a register (in exec's list of alerts
 that number is "memory list insane").
 
-Not tried: the AROS Live CD's contents (the desktop, Wanderer, is on it),
-the mouse under AROS, AROS in the app window, and AROS's own ROM files in
-place of Kickstart (they need a second ROM area at `$E00000`).
+Not tried: using the desktop by hand in the app window (the mouse there is
+captured by a click), starting programs from the desktop, the desktop with
+1 MiB chip RAM instead of fast RAM, the whole CD including `Developer`, and
+AROS's own ROM files in place of Kickstart (they need a second ROM area at
+`$E00000`; with them no Commodore ROM would be needed at all).
 
 ## Audio (Paula)
 
@@ -630,7 +677,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-The tests are in two places. `swift test` runs the 93 tests of the Amiga
+The tests are in two places. `swift test` runs the 94 tests of the Amiga
 machine in `Tests/MacMigaCoreTests`. `swift test --package-path Packages/M68K`
 runs the 74 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
 branch, logic/shift and decimal/MOVEP/CHK tests described below). Coverage includes
@@ -687,7 +734,8 @@ hash, and volumes read back by a separate reader in the test: files of every
 size class up to several extension blocks, hash chains, nested and empty
 directories, metadata, a bitmap that marks exactly the unused blocks, bitmap
 extension blocks, name and conflict errors, a Mac folder turned into
-entries and into a hardfile, and a folder and an archive merged into one volume.
+entries and into a hardfile, a folder and an archive merged into one volume,
+and sources read with paths and unstorable names left out.
 Chip RAM tests cover the three sizes and their mirrors, the overlay and reset
 with 1 MiB, the Agnus ID, a Blitter copy and a Copper list above 512 KiB (and
 their wrap-around with 512 KiB), BLTCON0L, blits taller than 1,024 lines and
@@ -704,7 +752,7 @@ These tests establish the implemented contract, not Amiga software compatibility
 ROMs remain user-supplied and ignored by Git. From the repository root:
 
 ```sh
-swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--key FRAME:HEXCODE]... [--fire FRAME]... "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
 ```
 
 `--hdf` attaches a hardfile as DH0 (the file itself is never modified;
@@ -716,6 +764,10 @@ Kickstart 2.0 and newer graphics.library's ChipRevBits0 (which chips Kickstart
 found).
 `--key 4000:59` presses the key with Amiga raw code `$59` (F10) at frame 4000
 for 5 frames; `--fire 2600` holds the port-2 fire button for 10 frames.
+`--mouse 7500:128:41` moves the mouse by 128 and 41 counts from frame 7500 on
+(at most 8 counts a frame), `--click 7600` holds the left button for 5 frames,
+`--right 9300:300` holds the right button for 300 frames, and `--snapshot 7000`
+also writes that frame, as `DIR/<rom name>-7000.png`.
 Whatever the software wrote to the serial port is printed, and `--trace N`
 executes N more instructions after the limit, printing the PC, the next three
 words and all registers before each.
@@ -753,8 +805,9 @@ compatibility.
 
 ## Next milestones
 
-1. Desktop: put the AROS Live CD's contents on a hard disk image and get to
-   its desktop (Wanderer); fix what breaks.
+1. Desktop: start AROS from its own ROM files instead of Kickstart (needs the
+   second ROM area at `$E00000`), so that no Commodore ROM is required; use the
+   AROS desktop by hand in the app and fix what breaks.
 2. WHDLoad: try more installs and fix what breaks. Hard disk: load file
    systems stored in a partition table; try an image partitioned on an Amiga.
 3. CPU package: instruction timing; later a 68030/68040 with MMU and FPU for
