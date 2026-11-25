@@ -86,3 +86,18 @@ private func customMemory() throws -> AmigaMemory {
     try memory.writeWord(0x00FC, at: 0xDF_F07C)
     #expect(try memory.readWord(at: 0xDF_F07C) == 0xFFFF)
 }
+
+@Test func serialPortIsIdleAndKeepsWhatIsSent() throws {
+    var memory = try customMemory()
+    // Nothing connected: transmitter empty (TBE, TSRE), receive line high.
+    #expect(try memory.readWord(at: 0xDF_F018) == 0x3800)
+    #expect(memory.custom.intreq & 1 == 0)
+    for byte in "Hi\n".utf8 { try memory.writeWord(0x0100 | UInt16(byte), at: 0xDF_F030) } // with the stop bit
+    #expect(memory.custom.serialOutput == Array("Hi\n".utf8))
+    #expect(memory.custom.intreq & 1 == 1) // TBE
+    #expect(try memory.readWord(at: 0xDF_F018) == 0x3800)
+    // Only the most recent output is kept.
+    for index in 0..<70_000 { try memory.writeWord(UInt16(index & 0xFF), at: 0xDF_F030) }
+    #expect(memory.custom.serialOutput.count <= 1 << 16)
+    #expect(memory.custom.serialOutput.last == UInt8((70_000 - 1) & 0xFF))
+}

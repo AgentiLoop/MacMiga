@@ -20,6 +20,7 @@ public struct CustomChips: Equatable, Sendable {
         public static let potgor = 0x016, serdatr = 0x018, dskbytr = 0x01A
         public static let intenar = 0x01C, intreqr = 0x01E
         public static let dmacon = 0x096, intena = 0x09A, intreq = 0x09C, adkcon = 0x09E
+        public static let serdat = 0x030
         public static let dskpth = 0x020, dsklen = 0x024, deniseid = 0x07C, dsksync = 0x07E
         public static let joytest = 0x036, spr0pth = 0x120, spr0pos = 0x140
         public static let copcon = 0x02E, cop1lch = 0x080, cop2lch = 0x084
@@ -72,6 +73,10 @@ public struct CustomChips: Equatable, Sendable {
     private var diskLengthArmed = false
     /// Set when a disk transfer has been started and not yet run.
     public internal(set) var diskDMAPending = false
+    /// Bytes software wrote to the serial port (SERDAT), oldest first; the host may read
+    /// and clear them. Only the most recent ones are kept.
+    public var serialOutput: [UInt8] = []
+    static let serialOutputLimit = 1 << 16
     /// Bit n set when AUDnDAT was written by the CPU (consumed by non-DMA audio playback).
     var audioDataWritten: UInt8 = 0
     /// COLORxx writes during the current line, in order, so Denise output can follow
@@ -113,7 +118,10 @@ public struct CustomChips: Equatable, Sendable {
         case Register.intreqr: return intreq
         case Register.joy0dat: return UInt16(mouseY) << 8 | UInt16(mouseX)
         case Register.joy1dat: return joystick1.data
-        case Register.serdatr, Register.dskbytr: return 0
+        // Nothing is connected to the serial port: the transmitter is always empty (TBE,
+        // TSRE) and the receive line idles high (RXD).
+        case Register.serdatr: return 0x3800
+        case Register.dskbytr: return 0
         // The OCS Denise has no ID register and leaves the bus alone. An undriven bus is
         // modelled as all ones here, so Kickstart 2.0+ does not take it for an ECS Denise
         // (which answers `$xxFC`).
@@ -136,6 +144,10 @@ public struct CustomChips: Equatable, Sendable {
         case Register.adkcon: Self.setClear(&adkcon, value, mask: 0x7FFF)
         case Register.copjmp1: copperJump = 1
         case Register.copjmp2: copperJump = 2
+        case Register.serdat: // sent at once: the byte is kept for the host, and TBE (INTREQ bit 0) follows
+            serialOutput.append(UInt8(truncatingIfNeeded: value))
+            if serialOutput.count > Self.serialOutputLimit { serialOutput.removeFirst(serialOutput.count - Self.serialOutputLimit / 2) }
+            intreq |= 0x0001
         case Register.bltsize: // height in bits 15–6, width in bits 5–0; 0 means 1024 and 64
             blitHeight = value >> 6 == 0 ? 1024 : Int(value >> 6)
             blitWidth = value & 0x3F == 0 ? 64 : Int(value & 0x3F)
