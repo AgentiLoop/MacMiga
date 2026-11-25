@@ -640,18 +640,18 @@ Checked on November 25, 2026 with the probe and the two ROM files of the
 | Machine and disks | Result |
 | --- | --- |
 | no disks, 8 MiB fast RAM | AROS's ROM started and showed its boot picture; its exec lists both ROM areas, and its boot log on the serial port says "1MiB ROM detected" |
-| floppy, 8 MiB fast RAM | the AROS shell, as with Kickstart |
+| floppy, 8 MiB fast RAM | the AROS shell and its request for the Live CD, as with Kickstart |
 | floppy and CD image, 4 MiB fast RAM | the desktop by frame 5,000 (100 s), sooner than with Kickstart; 5,552 blocks read, none written. The pointer followed the mouse, two clicks opened the "AROS Live CD" window, and the right button brought down the menu |
 | floppy and CD image, 2 MiB fast RAM, or 1 MiB chip RAM and no fast RAM | the desktop, the same way |
 | floppy and CD image, stock memory | a requester: could not open "posixc.library" |
 | floppy and CD image, 8 MiB fast RAM | the CD's whole startup ran: 38,267 blocks read and 189 written (font lists), then the desktop with four icons, by frame 25,000 (500 s) |
 | the same with the image file read-only | the requester "Volume AROS Live CD is write protected" |
-| CD image alone, without the floppy, 8 MiB fast RAM | did not work. AROS booted from the image and ran the CD's startup with no screen open, then wrote through a null pointer (address 6, which destroys the pointer to exec at address 4) and crashed. It happened in the routine that moves the mouse pointer, right after the CD's pointer preference (PNG pointer images) was applied. With that one preference file left out of the image the desktop appeared, with AROS's own alert "Program failed … Wanderer … Illegal instruction". Whether a real 68000 Amiga does the same was not determined |
+| CD image alone, without the floppy, 8 MiB fast RAM | did not work. AROS booted from the image and ran the CD's startup with no screen open, then wrote through a null pointer (address 6, which destroys the pointer to exec at address 4) and crashed. The write stores the mouse position into a sprite structure that is not there, and it no longer happens when the CD's pointer preference file (it names PNG pointer images) is left out of the image. Without that file the desktop appeared, together with AROS's own alert "Program failed … Wanderer … Illegal instruction". Whether a real 68000 Amiga does the same was not determined |
 
 In the app, started with the two ROMs, the floppy, the image (read-only),
 `-ChipRAM1MB YES` and `-Warp YES`, a capture of the window after 40 seconds
-showed the desktop. The Kickstart results above are unchanged (identical
-frames).
+showed the desktop with its title bar and three icons. The Kickstart results
+above are unchanged (identical frames).
 
 ## Audio (Paula)
 
