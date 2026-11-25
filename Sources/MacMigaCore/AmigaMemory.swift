@@ -30,6 +30,8 @@ public struct AmigaMemory {
     public var video = Video()
     /// Internal floppy drive DF0, controlled through CIA-B port B.
     public internal(set) var drive = FloppyDrive()
+    /// Paula's four audio channels and the mixed host sample stream, driven by `advanceChipset`.
+    public var audio = Paula()
 
     /// ROM overlay follows CIA-A PA0 (OVL). The line is pulled up, so it is active
     /// while PA0 is still an input after reset.

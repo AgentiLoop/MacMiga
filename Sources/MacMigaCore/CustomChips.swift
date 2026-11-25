@@ -61,6 +61,8 @@ public struct CustomChips: Equatable, Sendable {
     private var diskLengthArmed = false
     /// Set when a disk transfer has been started and not yet run.
     public internal(set) var diskDMAPending = false
+    /// Bit n set when AUDnDAT was written by the CPU (consumed by non-DMA audio playback).
+    var audioDataWritten: UInt8 = 0
 
     public init() {}
 
@@ -102,6 +104,7 @@ public struct CustomChips: Equatable, Sendable {
         case Register.copjmp1: copperJump = 1
         case Register.copjmp2: copperJump = 2
         case Register.bltsize: blitPending = true
+        case 0x0AA, 0x0BA, 0x0CA, 0x0DA: audioDataWritten |= 1 << ((register - 0x0AA) >> 4)
         case Register.joytest:
             mouseY = (mouseY & 3) | UInt8(value >> 8) & 0xFC
             mouseX = (mouseX & 3) | UInt8(value & 0xFC)

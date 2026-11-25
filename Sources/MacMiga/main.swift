@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import MacMigaCore
 import UniformTypeIdentifiers
 
@@ -11,9 +12,11 @@ final class Emulator {
     private(set) var diskURL: URL?
     private var disk: [UInt8]?
     var onError: ((String) -> Void)?
+    let audio = AudioOutput()
 
     func load(rom url: URL) throws {
-        let machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)))
+        var machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)))
+        if let audio { machine.memory.audio.sampleRate = audio.sampleRate }
         self.machine = machine
         romURL = url
         UserDefaults.standard.set(url.path, forKey: "kickstartPath")
@@ -47,6 +50,7 @@ final class Emulator {
                 try machine.step()
                 steps += 1
             }
+            audio?.queue.push(machine.memory.audio.drainSamples())
             self.machine = machine
         } catch {
             self.machine = nil
@@ -58,6 +62,66 @@ final class Emulator {
 
     func mouse(dx: Int, dy: Int, left: Bool, right: Bool) {
         machine?.mouse(dx: dx, dy: dy, left: left, right: right)
+    }
+}
+
+/// Thread-safe FIFO of interleaved stereo samples between the emulator (main thread) and
+/// the Core Audio render thread. Keeps at most ~100 ms queued so latency stays low.
+final class AudioQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer: [Float] = []
+    private var readIndex = 0
+    let maximum: Int
+
+    init(sampleRate: Int) { maximum = sampleRate / 10 * 2 }
+
+    func push(_ samples: [Float]) {
+        lock.lock(); defer { lock.unlock() }
+        buffer.append(contentsOf: samples)
+        let queued = buffer.count - readIndex
+        if queued > maximum { readIndex += (queued - maximum) & ~1 }
+        if readIndex > 65_536 { buffer.removeFirst(readIndex); readIndex = 0 }
+    }
+
+    /// Fills `frames` stereo frames, padding with silence when the emulator falls behind.
+    func pull(frames: Int, left: UnsafeMutablePointer<Float>, right: UnsafeMutablePointer<Float>) {
+        lock.lock(); defer { lock.unlock() }
+        for frame in 0..<frames {
+            if readIndex + 1 < buffer.count {
+                left[frame] = buffer[readIndex]
+                right[frame] = buffer[readIndex + 1]
+                readIndex += 2
+            } else {
+                left[frame] = 0
+                right[frame] = 0
+            }
+        }
+    }
+}
+
+/// Plays the Paula output through AVAudioEngine.
+final class AudioOutput {
+    let engine = AVAudioEngine()
+    let queue: AudioQueue
+    let sampleRate: Int
+
+    init?() {
+        sampleRate = Int(engine.outputNode.outputFormat(forBus: 0).sampleRate)
+        guard sampleRate > 0,
+              let format = AVAudioFormat(standardFormatWithSampleRate: Double(sampleRate), channels: 2) else { return nil }
+        let queue = AudioQueue(sampleRate: sampleRate)
+        self.queue = queue
+        let source = AVAudioSourceNode(format: format) { _, _, frameCount, bufferList in
+            let buffers = UnsafeMutableAudioBufferListPointer(bufferList)
+            guard buffers.count >= 2,
+                  let left = buffers[0].mData?.assumingMemoryBound(to: Float.self),
+                  let right = buffers[1].mData?.assumingMemoryBound(to: Float.self) else { return noErr }
+            queue.pull(frames: Int(frameCount), left: left, right: right)
+            return noErr
+        }
+        engine.attach(source)
+        engine.connect(source, to: engine.mainMixerNode, format: format)
+        do { try engine.start() } catch { return nil }
     }
 }
 
