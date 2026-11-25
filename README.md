@@ -177,8 +177,11 @@ DMAEN and COPEN are set; each instruction takes 4 colour clocks. At the end of
 each line, bitplane DMA fetches 1–6 planes (lowres/hires, DDFSTRT/DDFSTOP,
 modulos, BPLCON1 scroll) inside the vertical display window and Denise draws them
 into `Video.pixels`, a 736×312 hires ARGB frame (column 0 = lowres position
-`$58`), with dual playfield, HAM and extra half-brite colours. Registers in
-effect at the end of a line apply to the whole line. Sprites, collisions,
+`$58`), with dual playfield, HAM and extra half-brite colours. Colour register
+writes (Copper or CPU) are logged with their beam position and take effect from
+that colour clock, so mid-line palette changes split the line (Kickstart 3.1's
+checkmark resets COLOR04/05 at H `$98` on every line of its lower half). Other
+registers in effect at the end of a line apply to the whole line. Collisions,
 interlace and DMA slot contention are not implemented.
 
 `Blitter.swift` runs a blit as soon as BLTSIZE is written (with DMAEN and
