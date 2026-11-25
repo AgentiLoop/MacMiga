@@ -248,7 +248,9 @@ extension AmigaMemory {
         }
         let fetchStart = Int(custom.register(R.ddfstrt) & 0xFC)
         let fetchStop = Int(custom.register(R.ddfstop) & 0xFC)
-        let units = fetchStop >= fetchStart ? (fetchStop - fetchStart) / 8 + 1 : 0
+        // Fetch runs in 8-colour-clock units from DDFSTRT; the unit in progress when DDFSTOP
+        // is reached is completed (hires DDF values are 4-aligned, e.g. $3C-$D0 = 20 units).
+        let units = fetchStop >= fetchStart ? (fetchStop - fetchStart + 7) / 8 + 1 : 0
         let words = units * (hires ? 2 : 1)
         var data = [UInt16](repeating: 0, count: planes * words)
         for plane in 0..<planes {

@@ -135,3 +135,17 @@ private func setUpPlayfield(_ memory: inout AmigaMemory, hires: Bool) throws {
     #expect(pixel(memory, row: 0x40, column: split + 16) == black)
     #expect(pixel(memory, row: 0x41, column: split - 16) == black)
 }
+
+@Test func hiresFetchCompletesTheUnitInProgressAtDDFSTOP() throws {
+    // Kickstart 1.3's boot CLI screen: hires, DDF $3C-$D0 must fetch 640 pixels (80 bytes) per line.
+    var memory = try videoMemory()
+    try memory.writeWord(0x9200, at: 0xDFF100) // BPLCON0: hires, 1 plane
+    try memory.writeWord(0x2C81, at: 0xDFF08E)
+    try memory.writeWord(0xF4C1, at: 0xDFF090)
+    try memory.writeWord(0x003C, at: 0xDFF092)
+    try memory.writeWord(0x00D0, at: 0xDFF094)
+    try memory.writeLong(0x10000, at: 0xDFF0E0) // BPL1PT
+    try memory.writeWord(0x8300, at: 0xDFF096) // DMAEN | BPLEN
+    memory.advanceChipset(colorClocks: CustomChips.colorClocksPerLine * 0x2D)
+    #expect(memory.custom.bitplanePointers[0] == 0x10000 + 80)
+}
