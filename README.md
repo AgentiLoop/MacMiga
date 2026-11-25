@@ -762,9 +762,16 @@ Mac folder only regular files and directories are taken; symbolic links,
 local time.
 
 `LHA.swift` (`LHA.unpack`) reads LHA archives with header levels 0, 1 and 2 and
-the methods `-lh0-` (stored), `-lh4-` to `-lh7-` and `-lhd-` (directories),
-checking each file's CRC-16. Other methods, including the older `-lh1-`, are
-reported as unsupported. For archives made on an Amiga the protection bits and
+the methods `-lh0-` and `-lz4-` (stored), `-lh1-` (LHarc 1.x and early Amiga
+LhA: a 4 KiB window and an adaptive Huffman code), `-lh4-` to `-lh7-`, `-lzs-`
+and `-lz5-` (LArc, LHarc's predecessor) and `-lhd-` (directories), checking
+each file's CRC-16. The rarer `-lh2-`, `-lh3-` and PMarc's methods are reported
+as unsupported. The older methods were checked against archives from Lhasa's
+test suite (LhA 1.22 for Amiga, LHArc 1.13c and LArc 3.33, kept in
+`Tests/MacMigaCoreTests/Fixtures/LHA` under Lhasa's ISC license): every member
+passes its CRC, `-lh1-` and `-lz5-` unpack to the same text as the stored
+archive's, a 1.2 MB `-lh1-` file exercises the adaptive code's rebuilds, and a
+crafted `-lz5-` archive copies all of LArc's initial window. For archives made on an Amiga the protection bits and
 file comments are kept.
 
 Checked on November 25, 2026 with Kickstart 3.1 and the probe:

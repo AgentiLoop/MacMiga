@@ -5,7 +5,7 @@ public enum LHAError: Error, Equatable {
     case badHeader(offset: Int)
     /// A header level other than 0, 1 or 2.
     case unsupportedHeaderLevel(Int)
-    /// A compression method this reader does not implement (for example `-lh1-`).
+    /// A compression method this reader does not implement (for example `-lh2-`).
     case unsupportedMethod(String)
     /// The compressed data of the named member is not a valid bit stream.
     case corruptData(String)
@@ -16,8 +16,10 @@ public enum LHAError: Error, Equatable {
 /// Reader for LHA (`.lha`, `.lzh`) archives, the usual packaging of Amiga software.
 ///
 /// Header levels 0, 1 and 2 are read, with the file name and directory extended headers.
-/// Methods: `-lh0-` (stored), `-lh4-`…`-lh7-` (LZ77 with static Huffman codes and a 4, 8,
-/// 32 or 64 KiB window) and `-lhd-` (directory). Every unpacked member is checked against
+/// Methods: `-lh0-` and `-lz4-` (stored), `-lh1-` (LHarc's 4 KiB LZ77 with an adaptive
+/// Huffman code), `-lh4-`…`-lh7-` (LZ77 with static Huffman codes and a 4, 8, 32 or 64 KiB
+/// window), `-lzs-` and `-lz5-` (LArc's LZSS with a 2 or 4 KiB window) and `-lhd-`
+/// (directory). Every unpacked member is checked against
 /// its CRC-16. Names are taken as ISO Latin-1, the Amiga's character set. For archives
 /// made on an Amiga the attribute byte is kept as the protection bits and a comment
 /// stored after the name is kept as the file comment.
@@ -109,7 +111,10 @@ public enum LHA {
             var contents: [UInt8]?
             switch method {
             case "-lhd-": contents = nil
-            case "-lh0-": contents = Array(packed.prefix(originalSize))
+            case "-lh0-", "-lz4-": contents = Array(packed.prefix(originalSize))
+            case "-lh1-": contents = expandAdaptive(packed, size: originalSize)
+            case "-lzs-": contents = expandLZS(packed, size: originalSize)
+            case "-lz5-": contents = expandLZ5(packed, size: originalSize)
             case "-lh4-", "-lh5-": contents = try expand(packed, size: originalSize, positionCodes: 14, positionBits: 4, label)
             case "-lh6-": contents = try expand(packed, size: originalSize, positionCodes: 16, positionBits: 5, label)
             case "-lh7-": contents = try expand(packed, size: originalSize, positionCodes: 17, positionBits: 5, label)
@@ -207,6 +212,173 @@ public enum LHA {
             }
             return nil
         }
+    }
+
+    /// The `-lzs-` decoder (LArc): a flag bit, then 8 bits of a literal or an 11-bit position
+    /// in the 2 KiB window and a 4-bit length (2–17 bytes). The window starts out filled with
+    /// spaces and is written from 17 bytes before its end.
+    private static func expandLZS(_ packed: ArraySlice<UInt8>, size: Int) -> [UInt8] {
+        var reader = BitReader(packed)
+        var window = [UInt8](repeating: 0x20, count: 2048)
+        var position = 2048 - 17
+        var output = [UInt8]()
+        output.reserveCapacity(size)
+        func put(_ byte: UInt8) {
+            output.append(byte)
+            window[position] = byte
+            position = (position + 1) & 2047
+        }
+        while output.count < size, reader.index < reader.bytes.endIndex {
+            if reader.bit() == 1 {
+                put(UInt8(reader.bits(8)))
+            } else {
+                let source = reader.bits(11), length = reader.bits(4) + 2
+                for index in 0..<min(length, size - output.count) { put(window[(source + index) & 2047]) }
+            }
+        }
+        return output
+    }
+
+    /// The `-lz5-` decoder (LArc, also LHarc): a flag byte, least significant bit first, for
+    /// the next eight items; a set bit is a literal byte, a clear one two bytes holding a
+    /// 12-bit position in the 4 KiB window and a 4-bit length (3–18 bytes). The window starts
+    /// out with a fixed pattern and is written from 18 bytes before its end.
+    private static func expandLZ5(_ packed: ArraySlice<UInt8>, size: Int) -> [UInt8] {
+        // 13 bytes of each value, every value ascending and descending, 128 zeros,
+        // 110 spaces and 18 zeros.
+        var window = [UInt8](repeating: 0, count: 4096)
+        for value in 0..<256 {
+            for index in 0..<13 { window[value * 13 + index] = UInt8(value) }
+            window[256 * 13 + value] = UInt8(value)
+            window[256 * 13 + 256 + value] = UInt8(255 - value)
+        }
+        for index in 256 * 13 + 512 + 128..<4096 - 18 { window[index] = 0x20 }
+        var position = 4096 - 18
+        var output = [UInt8]()
+        output.reserveCapacity(size)
+        func put(_ byte: UInt8) {
+            output.append(byte)
+            window[position] = byte
+            position = (position + 1) & 4095
+        }
+        var index = packed.startIndex
+        while output.count < size, index < packed.endIndex {
+            let flags = packed[index]
+            index += 1
+            for bit in 0..<8 where output.count < size && index < packed.endIndex {
+                if flags >> bit & 1 != 0 {
+                    put(packed[index])
+                    index += 1
+                } else {
+                    guard index + 1 < packed.endIndex else { return output }
+                    let low = Int(packed[index]), high = Int(packed[index + 1])
+                    index += 2
+                    let source = low | (high & 0xF0) << 4
+                    for offset in 0..<min((high & 0x0F) + 3, size - output.count) { put(window[(source + offset) & 4095]) }
+                }
+            }
+        }
+        return output
+    }
+
+    /// The `-lh1-` decoder (LHarc 1.x, Okumura's LZHUF): an adaptive Huffman code over 314
+    /// symbols, literal bytes and copy lengths 3–60, whose tree is updated after every
+    /// symbol; a copy's distance is a fixed code of 3–8 bits for its upper 6 bits followed
+    /// by the lower 6 bits. The 4 KiB window starts out filled with spaces.
+    private static func expandAdaptive(_ packed: ArraySlice<UInt8>, size: Int) -> [UInt8] {
+        let symbols = 314, nodes = 2 * symbols - 1, root = nodes - 1
+        var frequency = [Int](repeating: 0, count: nodes + 1)
+        var parent = [Int](repeating: 0, count: nodes + symbols)
+        var child = [Int](repeating: 0, count: nodes)
+        for index in 0..<symbols {
+            frequency[index] = 1
+            child[index] = index + nodes
+            parent[index + nodes] = index
+        }
+        var left = 0
+        for node in symbols...root {
+            frequency[node] = frequency[left] + frequency[left + 1]
+            child[node] = left
+            parent[left] = node
+            parent[left + 1] = node
+            left += 2
+        }
+        frequency[nodes] = 0xFFFF
+        parent[root] = 0
+
+        /// Halves the frequencies and rebuilds the tree once the root reaches 0x8000.
+        func rebuild() {
+            var leaf = 0
+            for node in 0..<nodes where child[node] >= nodes {
+                frequency[leaf] = (frequency[node] + 1) / 2
+                child[leaf] = child[node]
+                leaf += 1
+            }
+            var pair = 0
+            for node in symbols..<nodes {
+                let sum = frequency[pair] + frequency[pair + 1]
+                var at = node - 1
+                while sum < frequency[at] { at -= 1 }
+                at += 1
+                frequency.insert(sum, at: at); frequency.remove(at: node + 1)
+                child.insert(pair, at: at); child.remove(at: node + 1)
+                pair += 2
+            }
+            for node in 0..<nodes {
+                let below = child[node]
+                parent[below] = node
+                if below < nodes { parent[below + 1] = node }
+            }
+        }
+
+        func update(_ symbol: Int) {
+            if frequency[root] == 0x8000 { rebuild() }
+            var node = parent[symbol + nodes]
+            repeat {
+                frequency[node] += 1
+                let count = frequency[node]
+                var other = node + 1
+                if count > frequency[other] {
+                    while count > frequency[other + 1] { other += 1 }
+                    frequency[node] = frequency[other]
+                    frequency[other] = count
+                    let first = child[node]
+                    parent[first] = other
+                    if first < nodes { parent[first + 1] = other }
+                    let second = child[other]
+                    child[other] = first
+                    parent[second] = node
+                    if second < nodes { parent[second + 1] = node }
+                    child[node] = second
+                    node = other
+                }
+                node = parent[node]
+            } while node != 0
+        }
+
+        // Upper six bits of a distance: 1 code of 3 bits, 3 of 4, 8 of 5, 12 of 6, 24 of 7, 16 of 8.
+        let positionCode = Code(lengths: [3] + [Int](repeating: 4, count: 3) + [Int](repeating: 5, count: 8)
+                                + [Int](repeating: 6, count: 12) + [Int](repeating: 7, count: 24) + [Int](repeating: 8, count: 16))
+        var reader = BitReader(packed)
+        var output = [UInt8]()
+        output.reserveCapacity(size)
+        while output.count < size, reader.index < reader.bytes.endIndex {
+            var node = child[root]
+            while node < nodes { node = child[node + reader.bit()] }
+            let symbol = node - nodes
+            update(symbol)
+            if symbol < 256 {
+                output.append(UInt8(symbol))
+                continue
+            }
+            guard let upper = positionCode.decode(&reader) else { break }
+            var source = output.count - (upper << 6 | reader.bits(6)) - 1
+            for _ in 0..<min(symbol - 253, size - output.count) {
+                output.append(source >= 0 ? output[source] : 0x20)
+                source += 1
+            }
+        }
+        return output
     }
 
     /// The `-lh4-`…`-lh7-` decoder. The data comes in blocks: a 16-bit count of codes, then

@@ -166,8 +166,8 @@ private let sample: [[Token]] = [
     var header = good
     header[9] ^= 0x01 // a size byte: the header checksum no longer fits
     #expect(throws: LHAError.badHeader(offset: 0)) { try LHA.unpack(header) }
-    #expect(throws: LHAError.unsupportedMethod("-lh1-")) {
-        try LHA.unpack(member(level: 0, method: "-lh1-", name: Array("f".utf8), packed: [1, 2, 3], original: [1, 2, 3]))
+    #expect(throws: LHAError.unsupportedMethod("-lh2-")) {
+        try LHA.unpack(member(level: 0, method: "-lh2-", name: Array("f".utf8), packed: [1, 2, 3], original: [1, 2, 3]))
     }
     var level = member(level: 2, method: "-lh0-", name: Array("f".utf8), packed: [1], original: [1])
     level[20] = 3
@@ -575,4 +575,30 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
     var reader = VolumeReader(image: try FastFileSystem.hardfile(from: [folder], startupSequence: "Echo A\u{308}€"))
     reader.visited = [0, 1, reader.root]
     #expect(reader.tree(reader.root)["S/Startup-Sequence"] == .some([0x45, 0x63, 0x68, 0x6F, 0x20, 0xC4, 0x3F, 0x0A]))
+}
+
+@Test func olderMethodsUnpack() throws {
+    func archive(_ name: String) throws -> [UInt8] {
+        let url = try #require(Bundle.module.url(forResource: name, withExtension: nil, subdirectory: "Fixtures/LHA"))
+        return Array(try Data(contentsOf: url))
+    }
+    // LHA.unpack checks every member's CRC-16, so a wrong byte would throw.
+    let stored = try #require(try LHA.unpack(archive("amiga-lh0.lzh")).first?.contents)
+    #expect(stored.count == 6829 && stored.starts(with: [0x1F, 0x8B])) // gpl-2.gz
+    let lh1 = try LHA.unpack(archive("amiga-lh1.lzh"))
+    #expect(lh1.map(\.path) == [["gpl-2"]] && lh1[0].contents?.count == 18092)
+    #expect(lh1[0].contents?.starts(with: Array(String(repeating: " ", count: 20).utf8) + Array("GNU GENERAL PUBLIC LICENSE".utf8)) == true)
+    let lz5 = try LHA.unpack(archive("larc-lz5.lzs"))
+    #expect(lz5.map(\.path) == [["GPL-2"]] && lz5[0].contents == lh1[0].contents)
+    // Over a megabyte: the adaptive code's frequencies are halved and the tree rebuilt many times.
+    let long = try LHA.unpack(archive("lharc-long-lh1.lzh"))
+    #expect(long[0].contents?.count == 1_241_658)
+    #expect(long[0].contents?.starts(with: Array("Project Gutenberg Etext of Hamlet".utf8)) == true)
+    // Copies from every part of LArc's initial window.
+    #expect(try LHA.unpack(archive("larc-initial-lz5.lzs"))[0].contents?.count == 4234)
+    #expect(try LHA.unpack(archive("larc-subdir-lz4.lzs")).map(\.path) == [["SUBDIR", "SUBDIR2", "HELLO.TXT"]])
+    // A cut stream leaves the member short.
+    var cut = try archive("amiga-lh1.lzh")
+    cut.removeLast(200)
+    #expect(throws: LHAError.truncated) { try LHA.unpack(cut) }
 }

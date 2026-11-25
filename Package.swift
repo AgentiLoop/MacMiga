@@ -16,6 +16,6 @@ let package = Package(
         .executableTarget(name: "MacMiga", dependencies: ["MacMigaCore"]),
         .executableTarget(name: "KickstartProbe", dependencies: ["MacMigaCore"], path: "Tools"),
         .executableTarget(name: "MakeHardfile", dependencies: ["MacMigaCore"]),
-        .testTarget(name: "MacMigaCoreTests", dependencies: ["MacMigaCore"])
+        .testTarget(name: "MacMigaCoreTests", dependencies: ["MacMigaCore"], resources: [.copy("Fixtures")])
     ]
 )
