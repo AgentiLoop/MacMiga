@@ -4,9 +4,14 @@ import Foundation
 @main
 struct KickstartProbe {
     static func main() throws {
-        let paths = CommandLine.arguments.dropFirst()
+        var paths = Array(CommandLine.arguments.dropFirst())
+        var limit = 10_000
+        if paths.count >= 2, paths[0] == "--limit", let value = Int(paths[1]), value > 0 {
+            limit = value
+            paths.removeFirst(2)
+        }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
@@ -18,11 +23,11 @@ struct KickstartProbe {
             print(String(format: "Reset: SSP=$%08X PC=$%08X", cpu.supervisorStackPointer, cpu.programCounter))
             var completed = 0
             do {
-                for _ in 0..<10_000 {
+                for _ in 0..<limit {
                     try cpu.step(memory: &memory)
                     completed += 1
                 }
-                print("Stopped at the 10000-instruction limit; no boot success inferred.")
+                print("Stopped at the \(limit)-instruction limit; no boot success inferred.")
             } catch {
                 print(String(format: "Stopped after %d completed instructions at PC=$%08X", completed, cpu.programCounter))
                 if let opcode = try? memory.readWord(at: cpu.programCounter) {

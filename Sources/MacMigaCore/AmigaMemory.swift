@@ -41,6 +41,13 @@ public struct AmigaMemory {
         )
     }
 
+    /// `$F00000`–`$F7FFFF` is the diagnostic/extended-ROM slot, empty on a stock A500.
+    /// Kickstart probes it for the `$1111` cartridge signature. Real hardware returns
+    /// open-bus data there; this model returns zero (never `$1111`) and ignores writes.
+    private static func isEmptyDiagnosticSlot(_ physical: UInt32) -> Bool {
+        physical >= 0xF0_0000 && physical < 0xF8_0000
+    }
+
     public func readByte(at address: UInt32) throws -> UInt8 {
         let physical = address & Self.addressMask
         if physical >= 0xF8_0000 {
@@ -52,12 +59,13 @@ public struct AmigaMemory {
             }
             return chipRAM[Int(physical)]
         }
+        if Self.isEmptyDiagnosticSlot(physical) { return 0 }
         throw MemoryBusError.unmappedAddress(physical)
     }
 
     public mutating func writeByte(_ value: UInt8, at address: UInt32) throws {
         let physical = address & Self.addressMask
-        if physical >= 0xF8_0000 { return }
+        if physical >= 0xF8_0000 || Self.isEmptyDiagnosticSlot(physical) { return }
         if physical < UInt32(Self.chipRAMSize) {
             if !overlayEnabled { chipRAM[Int(physical)] = value }
             return

@@ -110,11 +110,22 @@ private func syntheticROM(size: Int = 256 * 1024) -> [UInt8] {
 @Test func reportsUnimplementedRegionsRatherThanInventingDeviceData() throws {
     var memory = try AmigaMemory(kickstart: syntheticROM())
     memory.setOverlay(enabled: false)
-    for address: UInt32 in [0x08_0000, 0xBF_E001, 0xDF_F000, 0xF7_FFFF] {
+    for address: UInt32 in [0x08_0000, 0xBF_E001, 0xDF_F000, 0xEF_FFFF] {
         #expect(throws: MemoryBusError.unmappedAddress(address)) { try memory.readByte(at: address) }
         #expect(throws: MemoryBusError.unmappedAddress(address)) { try memory.writeByte(0xFF, at: address) }
     }
     #expect(throws: MemoryBusError.unmappedAddress(0x08_0000)) {
         try memory.readLong(at: 0x07_FFFE)
     }
+}
+
+@Test func emptyDiagnosticSlotReadsZeroAndIgnoresWrites() throws {
+    var memory = try AmigaMemory(kickstart: syntheticROM())
+    for address: UInt32 in [0xF0_0000, 0xF0_0002, 0xF4_1234, 0xF7_FFFC, 0xFFF0_0000] {
+        try memory.writeLong(0x1111_1111, at: address)
+        #expect(try memory.readLong(at: address) == 0)
+    }
+    #expect(try memory.readByte(at: 0xF7_FFFF) == 0)
+    // The slot ends where the Kickstart window starts.
+    #expect(try memory.readWord(at: 0xF8_0000) == UInt16(syntheticROM()[0]) << 8 | UInt16(syntheticROM()[1]))
 }
