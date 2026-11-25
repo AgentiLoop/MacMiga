@@ -51,7 +51,8 @@ public enum VolumeError: Error, Equatable {
     case tooLarge
 }
 
-/// Writes AmigaDOS Fast File System volumes (`DOS\1`) as hardfile images with the geometry
+/// Writes AmigaDOS Fast File System volumes (`DOS\1`), or Original File System volumes
+/// (`DOS\0`) for Kickstart 1.x, which has no FFS in ROM, as hardfile images with the geometry
 /// `HardDisk` uses: 512-byte blocks, 2 reserved blocks, 32 blocks per cylinder.
 ///
 /// Layout: the root block sits in the middle of the volume, followed by the bitmap and
@@ -59,7 +60,8 @@ public enum VolumeError: Error, Equatable {
 /// end. Files and directories are found through 72-slot hash tables (names compare without
 /// regard to the case of A–Z); entries sharing a slot are chained in ascending block order.
 /// A file header lists its first 72 data blocks, extension blocks the rest. Every block
-/// except data blocks carries a checksum.
+/// except FFS data blocks carries a checksum; OFS data blocks hold 488 bytes after a 24-byte
+/// header (type, file header, sequence number, size, next data block, checksum).
 public enum FastFileSystem {
     static let blockSize = HardDisk.blockSize
     static let reserved = 2
@@ -108,9 +110,10 @@ public enum FastFileSystem {
     /// Builds a hardfile holding `entries`. Directories that are only mentioned in a path are
     /// created with the volume's date; a file given twice keeps its last version. Without
     /// `freeBytes` the volume gets 2 MiB of free space or a quarter of its contents, whichever
-    /// is more. The image is a whole number of cylinders.
+    /// is more. The image is a whole number of cylinders. `fastFileSystem` false writes OFS.
     public static func hardfile(named volume: String, entries: [VolumeEntry], freeBytes: Int? = nil,
-                                date: AmigaDate) throws -> [UInt8] {
+                                date: AmigaDate, fastFileSystem: Bool = true) throws -> [UInt8] {
+        let dataSize = fastFileSystem ? blockSize : blockSize - 24
         let root = Node(name: try bytes(ofName: volume), entry: VolumeEntry(path: [], contents: nil, date: date))
         for entry in entries where !entry.path.isEmpty {
             var node = root
@@ -141,7 +144,7 @@ public enum FastFileSystem {
             guard let contents = node.entry.contents else {
                 return 1 + node.children.reduce(0) { $0 + blocks(for: $1) }
             }
-            let data = (contents.count + blockSize - 1) / blockSize
+            let data = (contents.count + dataSize - 1) / dataSize
             return 1 + data + max(0, data - 1) / hashSlots
         }
         let contentBlocks = blocks(for: root) // includes the root block
@@ -238,11 +241,19 @@ public enum FastFileSystem {
                     seal(child.block)
                     continue
                 }
-                let count = (contents.count + blockSize - 1) / blockSize
+                let count = (contents.count + dataSize - 1) / dataSize
                 let data = (0..<count).map { _ in allocate() }
                 for (index, block) in data.enumerated() {
-                    let slice = contents[index * blockSize..<min(contents.count, (index + 1) * blockSize)]
-                    image.replaceSubrange(block * blockSize..<block * blockSize + slice.count, with: slice)
+                    let slice = contents[index * dataSize..<min(contents.count, (index + 1) * dataSize)]
+                    let start = block * blockSize + blockSize - dataSize
+                    image.replaceSubrange(start..<start + slice.count, with: slice)
+                    guard !fastFileSystem else { continue }
+                    put(8, block, 0)                        // T_DATA
+                    put(child.block, block, 4)
+                    put(index + 1, block, 8)
+                    put(slice.count, block, 12)
+                    put(index + 1 < count ? data[index + 1] : 0, block, 16)
+                    seal(block)
                 }
                 put(contents.count, child.block, 324)
                 put(data.first ?? 0, child.block, 16)
@@ -295,7 +306,7 @@ public enum FastFileSystem {
             }
             seal(block, checksumAt: 0)
         }
-        image.replaceSubrange(0..<4, with: [0x44, 0x4F, 0x53, 0x01]) // DOS\1
+        image.replaceSubrange(0..<4, with: [0x44, 0x4F, 0x53, fastFileSystem ? 1 : 0]) // DOS\1 or DOS\0
         return image
     }
 }

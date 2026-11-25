@@ -1,7 +1,7 @@
 import Foundation
 import MacMigaCore
 
-/// Builds a hardfile (one FFS partition, for MacMiga's DH0) from Mac folders and LHA archives.
+/// Builds a hardfile (one FFS or OFS partition, for MacMiga's DH0) from Mac folders and LHA archives.
 var arguments = Array(CommandLine.arguments.dropFirst())
 var name: String?
 var freeBytes: Int?
@@ -10,11 +10,15 @@ var list = false
 var excluded: [[String]] = []
 var skipNames = false
 var extract = false
+var autoStart = false
+var ofs = false
 while let first = arguments.first, first.hasPrefix("--") {
     arguments.removeFirst()
     if first == "--list" { list = true }
     else if first == "--extract" { extract = true }
     else if first == "--skip-long-names" { skipNames = true }
+    else if first == "--auto" { autoStart = true } // run the only program, as the app does
+    else if first == "--ofs" { ofs = true }        // for Kickstart 1.x
     else if first == "--exclude", !arguments.isEmpty { // a path from the top of a source, any case
         excluded.append(arguments.removeFirst().lowercased().split(separator: "/").map(String.init))
     }
@@ -30,7 +34,7 @@ while let first = arguments.first, first.hasPrefix("--") {
 guard list ? arguments.count == 1 : extract ? arguments.count == 2 : arguments.count >= 2 else {
     print("""
     Usage: MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]...
-                        [--skip-long-names] <folder | archive.lha>... <output.hdf>
+                        [--auto] [--ofs] [--skip-long-names] <folder | archive.lha>... <output.hdf>
            MakeHardfile --list <folder | archive.lha>
            MakeHardfile --extract <archive.lha> <new folder>
     """)
@@ -63,7 +67,8 @@ do {
     } else {
         let sources = arguments.dropLast().map { URL(fileURLWithPath: $0) }
         var skipped: [String] = []
-        let image = try FastFileSystem.hardfile(from: sources, name: name, freeBytes: freeBytes, startupSequence: startup) { path in
+        let image = try FastFileSystem.hardfile(from: sources, name: name, freeBytes: freeBytes, startupSequence: startup,
+                                                autoStart: autoStart, fastFileSystem: !ofs) { path in
             if excluded.contains(path.map { $0.lowercased() }) { return false }
             if skipNames, let last = path.last, !FastFileSystem.canStore(name: last) {
                 skipped.append(path.joined(separator: "/"))

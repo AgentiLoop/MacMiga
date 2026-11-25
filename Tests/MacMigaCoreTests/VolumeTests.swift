@@ -235,11 +235,22 @@ private struct VolumeReader {
                 let block = long(list, 24 + (71 - index) * 4)
                 if expectedFirst { #expect(long(header, 16) == block); expectedFirst = false }
                 #expect(visited.insert(block).inserted)
-                data += image[block * 512..<(block + 1) * 512]
+                if image[3] == 0 { // OFS: a checksummed 24-byte header in front of 488 bytes
+                    let sequence = data.count / 488 + 1
+                    #expect(sum(block) == 0)
+                    #expect(long(block, 0) == 8 && long(block, 4) == header && long(block, 8) == sequence)
+                    #expect(long(block, 12) == min(488, long(header, 324) - data.count))
+                    #expect(long(block, 16) == (sequence * 488 < long(header, 324) ? long(list, 24 + (70 - index) * 4) : 0)
+                            || index == count - 1)
+                    data += image[block * 512 + 24..<(block + 1) * 512]
+                } else {
+                    data += image[block * 512..<(block + 1) * 512]
+                }
             }
             list = long(list, 504)
         }
-        #expect((long(header, 324) + 511) / 512 == data.count / 512)
+        let size = image[3] == 0 ? 488 : 512
+        #expect((long(header, 324) + size - 1) / size == data.count / size)
         return Array(data.prefix(long(header, 324)))
     }
 
@@ -493,4 +504,42 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
     try Data(archive + [0]).write(to: archiveURL)
     #expect(try VolumeEntry.entries(of: archiveURL).count == 2)
     #expect(try VolumeEntry.entries(of: archiveURL) { $0 != ["Developer"] }.map(\.path) == [["Fonts", "short.font"]])
+}
+
+@Test func originalFileSystemVolumeForKickstart1() throws {
+    // 489 bytes need two OFS data blocks; 72 * 488 + 1 needs an extension block.
+    let sizes = [0, 1, 488, 489, 72 * 488 + 1]
+    let entries = sizes.enumerated().map { VolumeEntry(path: ["D", "f\($1)"], contents: pattern($1, seed: $0), date: stamp) }
+    let image = try FastFileSystem.hardfile(named: "Old", entries: entries, freeBytes: 0, date: stamp, fastFileSystem: false)
+    #expect(try HardDisk(image: image).partitions[0].dosType == 0x444F_5300)
+    var reader = VolumeReader(image: image)
+    reader.visited = [0, 1, reader.root]
+    var expected: [String: [UInt8]?] = ["D": nil]
+    for entry in entries { expected[entry.path.joined(separator: "/")] = .some(entry.contents) }
+    #expect(reader.tree(reader.root) == expected)
+    let free = reader.freeBlocks()
+    #expect(free.isDisjoint(with: reader.visited))
+    #expect(free.count + reader.visited.count == reader.blocks)
+}
+
+@Test func autoStartRunsTheOnlyProgram() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("MacMigaTests-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    let game = folder.appendingPathComponent("My Game")
+    try FileManager.default.createDirectory(at: game, withIntermediateDirectories: true)
+    let program: [UInt8] = [0, 0, 3, 0xF3, 0, 0, 0, 0]
+    try Data(program).write(to: game.appendingPathComponent("play"))
+    try Data(program).write(to: game.appendingPathComponent("play.Slave")) // WHDLoad slaves are not run
+    try Data([1, 2]).write(to: game.appendingPathComponent("data"))
+    func startup(_ image: [UInt8]) -> [UInt8]?? {
+        var reader = VolumeReader(image: image)
+        reader.visited = [0, 1, reader.root]
+        return reader.tree(reader.root)["S/Startup-Sequence"]
+    }
+    #expect(startup(try FastFileSystem.hardfile(from: [folder], autoStart: true)) == .some(Array("\"My Game/play\"\n".utf8)))
+    #expect(startup(try FastFileSystem.hardfile(from: [folder])) == nil)
+    #expect(startup(try FastFileSystem.hardfile(from: [folder], startupSequence: "x", autoStart: true)) == .some(Array("x\n".utf8)))
+    // Two programs: nothing is guessed.
+    try Data(program).write(to: game.appendingPathComponent("editor"))
+    #expect(startup(try FastFileSystem.hardfile(from: [folder], autoStart: true)) == nil)
 }

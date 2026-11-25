@@ -56,9 +56,13 @@ extension FastFileSystem {
     /// named `name`, or after the first folder or archive (characters AmigaDOS does not
     /// allow become `_`, and the name is cut to 30 characters), and dated now.
     /// `startupSequence`, if given, becomes the text of `S/Startup-Sequence`, replacing one
-    /// from the sources. Files and directories whose path `include` rejects are left out.
+    /// from the sources. Without one, `autoStart` makes a startup-sequence that runs the
+    /// sources' only AmigaDOS program (WHDLoad slaves aside), if they have exactly one and no
+    /// `S/Startup-Sequence`. Files and directories whose path `include` rejects are left out.
+    /// `fastFileSystem` false writes an OFS volume, for Kickstart 1.x.
     public static func hardfile(from sources: [URL], name: String? = nil, freeBytes: Int? = nil,
-                                startupSequence: String? = nil,
+                                startupSequence: String? = nil, autoStart: Bool = false,
+                                fastFileSystem: Bool = true,
                                 include: ([String]) -> Bool = { _ in true }) throws -> [UInt8] {
         precondition(!sources.isEmpty)
         var entries = try sources.flatMap { try VolumeEntry.entries(of: $0, include: include) }
@@ -69,10 +73,22 @@ extension FastFileSystem {
         let now = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day, .hour, .minute, .second], from: Date())
         let date = AmigaDate(year: now.year ?? 1978, month: now.month ?? 1, day: now.day ?? 1,
                              hour: now.hour ?? 0, minute: now.minute ?? 0, second: now.second ?? 0)
+        var startupSequence = startupSequence
+        if startupSequence == nil, autoStart,
+           !entries.contains(where: { $0.path.map { $0.lowercased() } == ["s", "startup-sequence"] }) {
+            let programs = entries.filter { entry in
+                guard let contents = entry.contents, let last = entry.path.last else { return false }
+                return contents.starts(with: [0, 0, 3, 0xF3]) && !last.lowercased().hasSuffix(".slave")
+            }
+            // A path with spaces is quoted for the shell.
+            if programs.count == 1, case let path = programs[0].path.joined(separator: "/") {
+                startupSequence = path.contains(" ") ? "\"\(path)\"" : path
+            }
+        }
         if let startupSequence {
             entries.append(VolumeEntry(path: ["S", "Startup-Sequence"], contents: Array((startupSequence + "\n").utf8), date: date))
         }
         return try hardfile(named: name ?? (fallback.isEmpty ? "MacMigaHD" : fallback), entries: entries,
-                            freeBytes: freeBytes, date: date)
+                            freeBytes: freeBytes, date: date, fastFileSystem: fastFileSystem)
     }
 }

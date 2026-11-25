@@ -566,7 +566,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         save.nameFieldStringValue = source.deletingPathExtension().lastPathComponent + ".hdf"
         guard save.runModal() == .OK, let destination = save.url else { return }
         do {
-            try Data(try FastFileSystem.hardfile(from: [source])).write(to: destination)
+            // Kickstart 1.x (before version 36) has no Fast File System in ROM.
+            let version = emulator.romURL.flatMap { try? Data(contentsOf: $0) }.map { $0.count > 13 ? Int($0[12]) << 8 | Int($0[13]) : 0 }
+            try Data(try FastFileSystem.hardfile(from: [source], autoStart: true,
+                                                 fastFileSystem: (version ?? 40) >= 36)).write(to: destination)
         } catch {
             alert("Could not make a hard disk from \(source.lastPathComponent): \(error)")
             return
