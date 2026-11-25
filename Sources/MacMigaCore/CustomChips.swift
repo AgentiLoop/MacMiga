@@ -63,6 +63,17 @@ public struct CustomChips: Equatable, Sendable {
     public internal(set) var diskDMAPending = false
     /// Bit n set when AUDnDAT was written by the CPU (consumed by non-DMA audio playback).
     var audioDataWritten: UInt8 = 0
+    /// COLORxx writes during the current line, in order, so Denise output can follow
+    /// mid-line palette changes. Cleared after each line is drawn.
+    var colorChanges: [ColorChange] = []
+
+    struct ColorChange: Equatable, Sendable {
+        /// Horizontal beam position (colour clocks) of the write.
+        let position: Int
+        let index: Int
+        let value: UInt16
+        let previous: UInt16
+    }
 
     public init() {}
 
@@ -95,6 +106,10 @@ public struct CustomChips: Equatable, Sendable {
 
     public mutating func writeWord(offset: Int, value: UInt16) {
         let register = offset & 0x1FE
+        if register >= Register.color00 && register < Register.color00 + 0x40 {
+            colorChanges.append(ColorChange(position: horizontalPosition, index: (register - Register.color00) >> 1,
+                                            value: value & 0xFFF, previous: written[register >> 1] & 0xFFF))
+        }
         written[register >> 1] = value
         switch register {
         case Register.dmacon: Self.setClear(&dmacon, value, mask: 0x07FF)

@@ -30,9 +30,11 @@ public struct Copper: Equatable, Sendable {
 ///
 /// Column 0 is lowres horizontal position `firstLowresColumn`; each row is one beam line
 /// (row = vertical position, 0–311). Bitplanes (1–6, lowres/hires, dual playfield, HAM
-/// and extra half-brite) are drawn per line with the registers in effect at the end of
-/// that line, so mid-line Copper colour changes affect the whole line. Sprites, collision
-/// detection and interlace are not implemented.
+/// and extra half-brite) are drawn per line with the bitplane/control registers in effect
+/// at the end of that line. Colour register writes (Copper or CPU) take effect from the
+/// colour clock at which they happened, so mid-line palette changes split the line
+/// (Denise's few-pixel output delay is not modelled). Collision detection and interlace
+/// are not implemented.
 public struct Video: Equatable, Sendable {
     public static let width = 736
     public static let height = CustomChips.linesPerFrame
@@ -85,6 +87,7 @@ extension AmigaMemory {
             if lineEnded {
                 lines += 1
                 renderLine(line)
+                custom.colorChanges.removeAll(keepingCapacity: true)
                 updateSprites(line)
             }
             if frameEnded {
@@ -204,7 +207,27 @@ extension AmigaMemory {
     /// and draws it into `video`.
     private mutating func renderLine(_ line: Int) {
         typealias R = CustomChips.Register
-        let background = Video.argb(custom.register(R.color00) & 0xFFF)
+        var raw = [UInt16](repeating: 0, count: 32)
+        for index in 0..<32 { raw[index] = custom.register(R.color00 + index * 2) & 0xFFF }
+        let changes = custom.colorChanges
+        for change in changes.reversed() { raw[change.index] = change.previous } // palette at line start
+        var colors = [UInt32](repeating: 0, count: 64)
+        for index in 0..<32 {
+            colors[index] = Video.argb(raw[index])
+            colors[index + 32] = Video.argb((raw[index] >> 1) & 0x777) // extra half-brite
+        }
+        var nextChange = 0
+        /// Applies colour writes made at or before the colour clock showing `column`.
+        func applyChanges(upTo column: Int) {
+            let clock = (Video.firstLowresColumn * 2 + column) >> 2
+            while nextChange < changes.count && changes[nextChange].position <= clock {
+                let change = changes[nextChange]
+                raw[change.index] = change.value
+                colors[change.index] = Video.argb(change.value)
+                colors[change.index + 32] = Video.argb((change.value >> 1) & 0x777)
+                nextChange += 1
+            }
+        }
         let bplcon0 = custom.register(R.bplcon0)
         let hires = bplcon0 & 0x8000 != 0
         let planes = min(Int(bplcon0 >> 12) & 7, hires ? 4 : 6)
@@ -213,7 +236,14 @@ extension AmigaMemory {
         let verticalStop = Int(diwStop >> 8) | (diwStop & 0x8000 == 0 ? 0x100 : 0)
         guard custom.dmacon & 0x0300 == 0x0300, planes > 0,
               line >= verticalStart, line < verticalStop else {
-            video.fill(row: line, with: background)
+            if changes.isEmpty {
+                video.fill(row: line, with: colors[0])
+            } else {
+                for column in 0..<Video.width {
+                    applyChanges(upTo: column)
+                    video.set(row: line, column: column, colors[0])
+                }
+            }
             return
         }
         let fetchStart = Int(custom.register(R.ddfstrt) & 0xFC)
@@ -231,13 +261,6 @@ extension AmigaMemory {
             custom.bitplanePointers[plane] = UInt32(bitPattern: Int32(bitPattern: pointer) &+ Int32(modulo)) & 0x1F_FFFE
         }
 
-        var colors = [UInt32](repeating: 0, count: 64)
-        var raw = [UInt16](repeating: 0, count: 32)
-        for index in 0..<32 {
-            raw[index] = custom.register(R.color00 + index * 2) & 0xFFF
-            colors[index] = Video.argb(raw[index])
-            colors[index + 32] = Video.argb((raw[index] >> 1) & 0x777) // extra half-brite
-        }
         let ham = bplcon0 & 0x0800 != 0 && planes == 6
         let dualPlayfield = bplcon0 & 0x0400 != 0
         let playfield2Priority = custom.register(R.bplcon2) & 0x0040 != 0
@@ -247,10 +270,11 @@ extension AmigaMemory {
         let bitCount = words * 16
         var held = raw[0]
         for column in 0..<Video.width {
+            if nextChange < changes.count { applyChanges(upTo: column) }
             let hiresPosition = Video.firstLowresColumn * 2 + column
             let lowres = hiresPosition >> 1
             guard lowres >= horizontalStart, lowres < horizontalStop else {
-                video.set(row: line, column: column, background)
+                video.set(row: line, column: column, colors[0])
                 continue
             }
             var index = 0

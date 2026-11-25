@@ -121,3 +121,17 @@ private func setUpPlayfield(_ memory: inout AmigaMemory, hires: Bool) throws {
     #expect(pixel(memory, row: 0x2C, column: first + 2) == Video.argb(0xF23))
     #expect(pixel(memory, row: 0x2C, column: first + 4) == Video.argb(0xF25)) // red held
 }
+
+@Test func copperColourChangeMidLineSplitsTheLine() throws {
+    // Kickstart 3.1 pattern: set COLOR00 at the start of line $40, restore it at H $98.
+    var memory = try videoMemory()
+    try store([0x4001, 0xFFFE, 0x0180, 0x0F00, 0x4099, 0xFFFE, 0x0180, 0x0000, 0xFFFF, 0xFFFE],
+              at: 0x2000, in: &memory)
+    try memory.writeLong(0x2000, at: 0xDFF080) // COP1LC
+    try memory.writeWord(0x8280, at: 0xDFF096) // DMAEN | COPEN
+    memory.advanceChipset(colorClocks: frame + CustomChips.colorClocksPerLine * 0x42)
+    let split = 0x98 * 4 - Video.firstLowresColumn * 2 // first column at colour clock $98
+    #expect(pixel(memory, row: 0x40, column: split - 16) == red)
+    #expect(pixel(memory, row: 0x40, column: split + 16) == black)
+    #expect(pixel(memory, row: 0x41, column: split - 16) == black)
+}
