@@ -40,6 +40,14 @@ public struct AmigaMemory {
     /// set by `AmigaMachine`), such reads return 0 and writes are ignored; the A500 has no
     /// bus-error source, and real reads there return whatever was last on the data bus.
     public var stopsOnUnmappedAccess = true
+    /// Zorro II AUTOCONFIG chain at `$E80000`: the fast RAM board, then the hard-disk controller.
+    public private(set) var expansion = ExpansionBus()
+    /// Zorro II fast RAM, mapped where Kickstart configures its board (`UInt32.max` until then).
+    private var fastRAM: [UInt8]
+    private var fastRAMBase = UInt32.max
+    /// The hard disk behind the controller board; nil when no controller is fitted.
+    public let hardDisk: HardDisk?
+    var hardDiskController = HardDiskController()
 
     /// ROM overlay follows CIA-A PA0 (OVL). The line is pulled up, so it is active
     /// while PA0 is still an input after reset.
@@ -48,14 +56,22 @@ public struct AmigaMemory {
     /// Accepts a raw, unencrypted 256 KiB or 512 KiB ROM supplied by the caller.
     /// Size validation does not establish that the image is a valid Kickstart ROM.
     /// `slowRAMSize` is 0 (stock A500) or up to 1.5 MiB in 256 KiB steps; the default
-    /// 512 KiB models the common A500 + A501 trapdoor expansion.
-    public init(kickstart: [UInt8], slowRAMSize: Int = 512 * 1024) throws {
+    /// 512 KiB models the common A500 + A501 trapdoor expansion. `fastRAMSize` is 0 or a
+    /// power of two from 64 KiB to 8 MiB on a Zorro II board; `hardDisk` fits the
+    /// hard-disk controller board. Kickstart configures both boards during startup.
+    public init(kickstart: [UInt8], slowRAMSize: Int = 512 * 1024, fastRAMSize: Int = 0,
+                hardDisk: HardDisk? = nil) throws {
         guard kickstart.count == 256 * 1024 || kickstart.count == 512 * 1024 else {
             throw MemoryBusError.invalidROMSize(kickstart.count)
         }
         precondition(slowRAMSize >= 0 && slowRAMSize <= 0x18_0000 && slowRAMSize % 0x4_0000 == 0)
+        precondition(fastRAMSize == 0 || (fastRAMSize >= 0x1_0000 && fastRAMSize <= 0x80_0000
+                                          && fastRAMSize & (fastRAMSize - 1) == 0))
         self.kickstart = kickstart
         self.slowRAM = [UInt8](repeating: 0, count: slowRAMSize)
+        self.fastRAM = [UInt8](repeating: 0, count: fastRAMSize)
+        self.hardDisk = hardDisk
+        expansion.install(fastRAMSize: fastRAMSize, hardDisk: hardDisk != nil)
         updateDrive()
     }
 
@@ -86,6 +102,10 @@ public struct AmigaMemory {
         copper = Copper()
         drive = FloppyDrive(disk: drive.disk) // a reset does not eject the disk
         updateDrive()
+        // Expansion boards lose their addresses and wait to be configured again.
+        expansion.install(fastRAMSize: fastRAM.count, hardDisk: hardDisk != nil)
+        fastRAMBase = .max
+        hardDiskController = HardDiskController()
         return try ResetVectors(
             supervisorStackPointer: readLong(at: 0),
             programCounter: readLong(at: 4)
@@ -105,10 +125,28 @@ public struct AmigaMemory {
         physical >= 0xD8_0000 && physical < 0xDF_F000
     }
 
-    /// `$E80000`–`$EFFFFF` is the Zorro II autoconfig window. No expansion boards are
-    /// fitted: reads return 0 (er_Type 0 is not a valid board type) and writes are ignored.
+    /// `$E80000`–`$EFFFFF` is Zorro II I/O space. Where no board answers, reads return 0
+    /// (er_Type 0 is not a valid board type) and writes are ignored.
     private static func isEmptyAutoconfig(_ physical: UInt32) -> Bool {
         physical >= 0xE8_0000 && physical < 0xF0_0000
+    }
+
+    /// The unconfigured board at the head of the chain answers in `$E80000`–`$E8FFFF`.
+    private func isConfigurationWindow(_ physical: UInt32) -> Bool {
+        physical & 0xFF_0000 == 0xE8_0000 && expansion.pendingBoard != nil
+    }
+
+    private func isHardDiskBoard(_ physical: UInt32) -> Bool {
+        physical >= hardDiskController.base && physical - hardDiskController.base < 0x1_0000
+    }
+
+    /// Maps a board at the address Kickstart just wrote to its configuration register.
+    private mutating func configured(_ board: ExpansionBus.Board) {
+        guard let base = board.base else { return }
+        switch board.kind {
+        case .fastRAM: fastRAMBase = base
+        case .hardDisk: if let hardDisk { hardDiskController.configure(base: base, disk: hardDisk) }
+        }
     }
 
     /// Custom registers at `$DFF000`–`$DFFFFF`, plus the part of `$C00000`–`$D7FFFF` not
@@ -141,6 +179,9 @@ public struct AmigaMemory {
             }
             return chipRAM[Int(physical) % Self.chipRAMSize]
         }
+        if physical >= fastRAMBase && physical - fastRAMBase < UInt32(fastRAM.count) {
+            return fastRAM[Int(physical - fastRAMBase)]
+        }
         if isSlowRAM(physical) { return slowRAM[Int(physical - 0xC0_0000)] }
         if Self.isEmptyDiagnosticSlot(physical) { return 0 }
         if Self.isCIARange(physical) {
@@ -154,6 +195,8 @@ public struct AmigaMemory {
             let word = custom.readWord(offset: Int(physical & 0x1FE))
             return physical & 1 == 0 ? UInt8(word >> 8) : UInt8(truncatingIfNeeded: word)
         }
+        if isHardDiskBoard(physical) { return readHardDiskBoard(offset: Int(physical - hardDiskController.base)) }
+        if isConfigurationWindow(physical) { return expansion.read(offset: Int(physical & 0xFFFF)) }
         if Self.isEmptyIORange(physical) || Self.isEmptyAutoconfig(physical) || !stopsOnUnmappedAccess { return 0 }
         throw MemoryBusError.unmappedAddress(physical)
     }
@@ -165,6 +208,10 @@ public struct AmigaMemory {
             if !(overlayEnabled && physical < UInt32(Self.chipRAMSize)) {
                 chipRAM[Int(physical) % Self.chipRAMSize] = value
             }
+            return
+        }
+        if physical >= fastRAMBase && physical - fastRAMBase < UInt32(fastRAM.count) {
+            fastRAM[Int(physical - fastRAMBase)] = value
             return
         }
         if isSlowRAM(physical) {
@@ -184,6 +231,14 @@ public struct AmigaMemory {
         if isCustomRange(physical) {
             // A byte write drives the same byte onto both halves of the 16-bit bus.
             custom.writeWord(offset: Int(physical & 0x1FE), value: UInt16(value) << 8 | UInt16(value))
+            return
+        }
+        if isHardDiskBoard(physical) {
+            writeHardDiskBoard(offset: Int(physical - hardDiskController.base), value: value)
+            return
+        }
+        if isConfigurationWindow(physical) {
+            if let board = expansion.write(offset: Int(physical & 0xFFFF), value: value) { configured(board) }
             return
         }
         if Self.isEmptyIORange(physical) || Self.isEmptyAutoconfig(physical) || !stopsOnUnmappedAccess { return }

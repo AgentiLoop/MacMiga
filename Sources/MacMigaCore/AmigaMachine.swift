@@ -23,8 +23,10 @@ public struct AmigaMachine {
     private var keyboardHandshakes = 0
     private var keyboardSentAt: UInt64?
 
-    public init(kickstart: [UInt8], slowRAMSize: Int = 512 * 1024) throws {
-        memory = try AmigaMemory(kickstart: kickstart, slowRAMSize: slowRAMSize)
+    public init(kickstart: [UInt8], slowRAMSize: Int = 512 * 1024, fastRAMSize: Int = 0,
+                hardDisk: HardDisk? = nil) throws {
+        memory = try AmigaMemory(kickstart: kickstart, slowRAMSize: slowRAMSize, fastRAMSize: fastRAMSize,
+                                 hardDisk: hardDisk)
         memory.stopsOnUnmappedAccess = false
         try cpu.reset(memory: &memory)
     }

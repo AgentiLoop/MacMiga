@@ -10,20 +10,27 @@ struct KickstartProbe {
         var limit = 10_000
         var frameDirectory: String?
         var adfPath: String?
+        var hardDiskPath: String?
+        var hardDiskOutput: String?
+        var fastRAM = 0
         while paths.count >= 2, paths[0].hasPrefix("--") {
             if paths[0] == "--limit", let value = Int(paths[1]), value > 0 { limit = value }
             else if paths[0] == "--frames" { frameDirectory = paths[1] }
             else if paths[0] == "--adf" { adfPath = paths[1] }
+            else if paths[0] == "--hdf" { hardDiskPath = paths[1] }
+            else if paths[0] == "--hdf-out" { hardDiskOutput = paths[1] }
+            else if paths[0] == "--fast", let value = Int(paths[1]), value >= 0 { fastRAM = value << 20 }
             else { break }
             paths.removeFirst(2)
         }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
             let bytes = try Data(contentsOf: URL(fileURLWithPath: path))
-            var machine = try AmigaMachine(kickstart: Array(bytes))
+            let hardDisk = try hardDiskPath.map { try HardDisk(image: Array(try Data(contentsOf: URL(fileURLWithPath: $0)))) }
+            var machine = try AmigaMachine(kickstart: Array(bytes), fastRAMSize: fastRAM, hardDisk: hardDisk)
             if let adfPath {
                 try machine.memory.insertDisk(adf: Array(try Data(contentsOf: URL(fileURLWithPath: adfPath))))
                 print("DF0: \(URL(fileURLWithPath: adfPath).lastPathComponent)")
@@ -49,6 +56,17 @@ struct KickstartProbe {
             let custom = machine.memory.custom
             print(String(format: "BPLCON0=$%04X DIW=$%04X-$%04X DDF=$%04X-$%04X", custom.register(0x100), custom.register(0x08E), custom.register(0x090), custom.register(0x092), custom.register(0x094)))
             print("COLOR00-07: " + (0..<8).map { String(format: "$%03X", custom.register(0x180 + $0 * 2)) }.joined(separator: " "))
+            let boards = machine.memory.expansion.boards.map { board in
+                "\(board.kind) " + (board.base.map { String(format: "at $%06X", $0) } ?? "not configured")
+            }
+            if !boards.isEmpty { print("Expansion boards: " + boards.joined(separator: ", ")) }
+            if let hardDisk {
+                print("DH0: \(hardDisk.cylinders) cylinders, \(hardDisk.blocksRead) blocks read, \(hardDisk.blocksWritten) written")
+                if let hardDiskOutput {
+                    try Data(hardDisk.bytes).write(to: URL(fileURLWithPath: hardDiskOutput))
+                    print("Hard disk image written to \(hardDiskOutput)")
+                }
+            }
             if let directory = frameDirectory {
                 let name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
                 let url = URL(fileURLWithPath: directory).appendingPathComponent(name + ".png")
