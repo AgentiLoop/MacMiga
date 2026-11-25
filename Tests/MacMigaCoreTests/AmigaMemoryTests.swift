@@ -110,7 +110,7 @@ private func syntheticROM(size: Int = 256 * 1024) -> [UInt8] {
 @Test func reportsUnimplementedRegionsRatherThanInventingDeviceData() throws {
     var memory = try AmigaMemory(kickstart: syntheticROM())
     memory.setOverlay(enabled: false)
-    for address: UInt32 in [0x08_0000, 0x9F_FFFF, 0xC0_0000, 0xDF_F000, 0xEF_FFFF] {
+    for address: UInt32 in [0x08_0000, 0x9F_FFFF, 0xC0_0000, 0xD7_FFFF, 0xEF_FFFF] {
         #expect(throws: MemoryBusError.unmappedAddress(address)) { try memory.readByte(at: address) }
         #expect(throws: MemoryBusError.unmappedAddress(address)) { try memory.writeByte(0xFF, at: address) }
     }
