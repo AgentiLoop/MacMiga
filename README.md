@@ -98,8 +98,10 @@ hardfile and restarts the machine; Detach Hard Disk removes it. Blocks the
 Amiga writes are saved back into the file about once a second and on quit (a
 file that is not writable is attached write-protected). Machine ▸ New Hard Disk
 from Folder or LHA… asks for a folder or archive and for where to save the new
-`.hdf`, builds it and attaches it. Machine ▸ 8 MB Fast RAM
-adds a Zorro II memory board (off by default, remembered, restarts the machine).
+`.hdf`, builds it and attaches it. Machine ▸ Fast RAM
+adds a Zorro II memory board of 1, 2, 4 or 8 MB (None by default, remembered,
+restarts the machine). On the command line `-FastRAM 4` sets the size for
+that run; `-FastRAM YES` means 8, as it did when the setting was a switch.
 Machine ▸ 1 MB Chip RAM (ECS Agnus) doubles chip RAM and swaps the Agnus (same
 rules; see "Chip RAM and the ECS Agnus"). Machine ▸ Warp Speed (⌘T) runs the
 emulation as fast as the Mac allows instead of at 50 frames a second, without
@@ -770,8 +772,8 @@ swift run -c release MakeHardfile --extract AROS-20261124-amiga-m68k-boot-floppy
 swift run -c release MacMiga "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom" aros/*/bootdisk-amiga-m68k.adf
 ```
 
-Turn on Machine ▸ 8 MB Fast RAM or 1 MB Chip RAM first; the stock memory is
-too small. Kickstart boots the floppy, whose first command (`AROSBootstrap`)
+Choose 8 MB under Machine ▸ Fast RAM, or turn on 1 MB Chip RAM, first; the
+stock memory is too small. Kickstart boots the floppy, whose first command (`AROSBootstrap`)
 loads AROS's ROM image into RAM and restarts the machine into it. AROS then
 starts from the same floppy and asks for its Live CD.
 
@@ -794,7 +796,7 @@ swift run -c release MacMiga "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom" 
 `Developer` (compilers and headers, three quarters of the CD, with file names
 too long for an Amiga volume) is left out; the image is then about 128 MB.
 `--skip-long-names` leaves out ten font files whose names have 31 or 32
-characters. With 8 MB Fast RAM on, the desktop is there after about 145
+characters. With 8 MB of fast RAM, the desktop is there after about 145
 emulated seconds; Machine ▸ Warp Speed shortens the wait.
 
 Checked on November 25, 2026 with the probe, Kickstart 3.1, 8 MiB fast RAM, and
@@ -845,8 +847,8 @@ swift run -c release MacMiga aros-rom.bin aros-ext.bin \
     aros/*/bootdisk-amiga-m68k.adf aros-live.hdf
 ```
 
-Turn on Machine ▸ 1 MB Chip RAM (and leave 8 MB Fast RAM off) for the quickest
-start. The boot floppy is still used: its script decides by the amount of free
+Choose 2 MB or 4 MB under Machine ▸ Fast RAM, or turn on 1 MB Chip RAM with
+no fast RAM, for the quickest start. The boot floppy is still used: its script decides by the amount of free
 memory. Below 8 MiB it only opens the desktop; from 8 MiB on it runs the CD's
 whole startup, which on the first start builds font lists and writes them to
 the image.
@@ -869,6 +871,23 @@ In the app, started with the two ROMs, the floppy, the image (read-only),
 `-ChipRAM1MB YES` and `-Warp YES`, a capture of the window after 40 seconds
 showed the desktop with its title bar and three icons. The Kickstart results
 above are unchanged (identical frames).
+
+The fast RAM sizes were checked in the app the same way on November 25, 2026
+(two ROMs, floppy, read-only image, `-Warp YES`, window captured after 45
+seconds and read by OCR):
+
+| Setting | Result |
+| --- | --- |
+| `-FastRAM 4` | the desktop; its title bar read "Chip: 441k, Fast: 3295k, Any: 3736k" |
+| `-FastRAM 2` | the desktop; "Fast: 1247k, Any: 1688k" |
+| `-FastRAM 8` | the CD's whole startup ran instead and stopped at the requester "Volume AROS Live CD is write protected" |
+
+With Kickstart 3.1 and the Pac-Man disk from "WHDLoad" above, `-FastRAM 1` and
+`-FastRAM YES` each showed the game's maze after 20 seconds at warp speed; no
+option, and `-FastRAM 3` (not a size the board comes in), showed WHDLoad's
+"Can't allocate ExpMem" requester. In the menu, a stored `FastRAM = YES` from
+an older version came up with 8 MB ticked; choosing 4 MB moved the tick,
+stored the number 4, and was ticked again after a restart of the app.
 
 ## Audio (Paula)
 
@@ -1090,8 +1109,7 @@ compatibility.
 
 1. Desktop: find out why AROS fails when it boots from the Live CD image
    without the floppy (see "AROS without a Kickstart ROM"); use the AROS
-   desktop by hand in the app and fix what breaks; fast RAM sizes other than
-   8 MB in the app.
+   desktop by hand in the app and fix what breaks.
 2. WHDLoad: try more installs and fix what breaks. Hard disk: try an image
    partitioned on an Amiga, and SFS and the 1.3 Fast File System from a
    partition table.

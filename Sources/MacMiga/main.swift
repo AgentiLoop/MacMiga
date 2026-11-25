@@ -18,8 +18,23 @@ final class Emulator {
     /// Hard disk image on the controller board (DH0); changed blocks are saved back to its file.
     private(set) var hardDisk: HardDisk?
     private(set) var hardDiskURL: URL?
-    /// 8 MiB of Zorro II fast RAM, off by default (the stock machine is 512 KiB chip + 512 KiB slow).
-    private(set) var fastRAM = UserDefaults.standard.bool(forKey: "FastRAM")
+    /// Sizes of Zorro II fast RAM the Machine menu offers, in MiB; 0 is none.
+    static let fastRAMSizes = [0, 1, 2, 4, 8]
+    /// MiB of Zorro II fast RAM; none by default (the stock machine is 512 KiB chip + 512 KiB slow).
+    private(set) var fastRAM = Emulator.fastRAMSetting(UserDefaults.standard.object(forKey: "FastRAM"))
+
+    /// The `FastRAM` default as MiB. It was a switch for 8 MiB before it was a size, so a
+    /// Boolean (as stored by older versions, or `-FastRAM YES` on the command line) means 8.
+    /// Anything that is not one of `fastRAMSizes` means none.
+    static func fastRAMSetting(_ value: Any?) -> Int {
+        var size = 0
+        if let number = value as? NSNumber {
+            size = CFGetTypeID(number) == CFBooleanGetTypeID() ? (number.boolValue ? 8 : 0) : number.intValue
+        } else if let text = value as? String {
+            size = Int(text) ?? (["yes", "true", "y"].contains(text.lowercased()) ? 8 : 0)
+        }
+        return fastRAMSizes.contains(size) ? size : 0
+    }
     /// 1 MiB of chip RAM with the ECS Agnus instead of 512 KiB with the OCS one; off by default.
     private(set) var bigChipRAM = UserDefaults.standard.bool(forKey: "ChipRAM1MB")
     var onError: ((String) -> Void)?
@@ -29,7 +44,7 @@ final class Emulator {
         let extendedROM = try extended.map { Array(try Data(contentsOf: $0)) } ?? []
         var machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)), extendedROM: extendedROM,
                                        chipRAMSize: bigChipRAM ? 1 << 20 : 512 << 10,
-                                       fastRAMSize: fastRAM ? 8 << 20 : 0, hardDisk: hardDisk)
+                                       fastRAMSize: fastRAM << 20, hardDisk: hardDisk)
         if let audio { machine.memory.audio.sampleRate = audio.sampleRate }
         self.machine = machine
         romURL = url
@@ -71,9 +86,10 @@ final class Emulator {
         try reset()
     }
 
-    func setFastRAM(_ enabled: Bool) throws {
-        fastRAM = enabled
-        UserDefaults.standard.set(enabled, forKey: "FastRAM")
+    func setFastRAM(megabytes: Int) throws {
+        guard Self.fastRAMSizes.contains(megabytes) else { return }
+        fastRAM = megabytes
+        UserDefaults.standard.set(megabytes, forKey: "FastRAM")
         try reset()
     }
 
@@ -557,9 +573,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         attach(hardDisk: destination)
     }
-    @objc func toggleFastRAM(_ sender: NSMenuItem) {
-        do { try emulator.setFastRAM(!emulator.fastRAM) } catch { alert("Reset failed: \(error)") }
-        sender.state = emulator.fastRAM ? .on : .off
+    /// An item of the Fast RAM submenu; its tag is the size in MiB.
+    @objc func chooseFastRAM(_ sender: NSMenuItem) {
+        do { try emulator.setFastRAM(megabytes: sender.tag) } catch { alert("Reset failed: \(error)") }
+        sender.menu?.items.forEach { $0.state = $0.tag == emulator.fastRAM ? .on : .off }
         view.updateJoystick()
     }
     @objc func toggleWarp(_ sender: NSMenuItem) {
@@ -594,8 +611,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         machine.addItem(withTitle: "Attach Hard Disk (DH0)…", action: #selector(chooseHardDisk), keyEquivalent: "d")
         machine.addItem(withTitle: "New Hard Disk from Folder or LHA…", action: #selector(newHardDisk), keyEquivalent: "")
         machine.addItem(withTitle: "Detach Hard Disk", action: #selector(detachHardDisk), keyEquivalent: "")
-        let fast = machine.addItem(withTitle: "8 MB Fast RAM", action: #selector(toggleFastRAM(_:)), keyEquivalent: "")
-        fast.state = emulator.fastRAM ? .on : .off
+        let fast = NSMenu(title: "Fast RAM")
+        for size in Emulator.fastRAMSizes {
+            let item = fast.addItem(withTitle: size == 0 ? "None" : "\(size) MB", action: #selector(chooseFastRAM(_:)), keyEquivalent: "")
+            item.tag = size
+            item.state = size == emulator.fastRAM ? .on : .off
+            item.target = self
+        }
+        machine.addItem(withTitle: "Fast RAM", action: nil, keyEquivalent: "").submenu = fast
         let chip = machine.addItem(withTitle: "1 MB Chip RAM (ECS Agnus)", action: #selector(toggleBigChipRAM(_:)),
                                    keyEquivalent: "")
         chip.state = emulator.bigChipRAM ? .on : .off
