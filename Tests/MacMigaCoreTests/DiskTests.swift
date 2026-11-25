@@ -108,3 +108,32 @@ private func startDiskRead(_ memory: inout AmigaMemory, words: UInt16, sync: Boo
     try startDiskRead(&memory, words: 4, sync: false)
     #expect(memory.custom.intreq & 0x0002 != 0)
 }
+
+@Test func extendedADFsKeepRawTracksAndSectorData() throws {
+    let adf = patternADF()
+    // Old UAE format: track 1 raw (sync $9521, 4 bytes), the rest AmigaDOS.
+    var old = Array("UAE--ADF".utf8)
+    for track in 0..<160 { old += track == 1 ? [0x95, 0x21, 0x00, 0x04] : [0x00, 0x00, 0x16, 0x00] }
+    for track in 0..<160 {
+        old += track == 1 ? [0x12, 0x34, 0x56, 0x78] : Array(adf[track * 5632..<(track + 1) * 5632])
+    }
+    var drive = FloppyDrive()
+    try drive.insert(adf: old)
+    #expect(drive.rawTracks == [1: [0x9521, 0x1234, 0x5678]])
+    #expect(drive.disk?[0..<5632] == adf[0..<5632])
+    #expect(drive.disk?[2 * 5632..<FloppyDrive.adfSize] == adf[2 * 5632..<FloppyDrive.adfSize])
+
+    // New UAE format: two tracks, track 0 AmigaDOS, track 1 raw with 24 bits used.
+    var new = Array("UAE-1ADF".utf8) + [0, 0, 0, 2]
+    new += [0, 0, 0, 0, 0x00, 0x00, 0x16, 0x00, 0x00, 0x00, 0xB0, 0x00]
+    new += [0, 0, 0, 1, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x18]
+    new += Array(adf[0..<5632]) + [0x44, 0x89, 0x44, 0x89, 0xAA, 0xAA]
+    try drive.insert(adf: new)
+    #expect(drive.rawTracks == [1: [0x4489, 0x4489]])
+    #expect(drive.disk?[0..<5632] == adf[0..<5632])
+
+    // A plain image with a stray trailing byte still loads; other sizes do not.
+    try drive.insert(adf: adf + [0])
+    #expect(drive.disk == adf && drive.rawTracks.isEmpty)
+    #expect(throws: FloppyError.invalidADFSize(1000)) { try drive.insert(adf: [UInt8](repeating: 0, count: 1000)) }
+}

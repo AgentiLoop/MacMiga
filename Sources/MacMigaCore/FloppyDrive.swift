@@ -1,5 +1,6 @@
 public enum FloppyError: Error, Equatable {
     case invalidADFSize(Int)
+    case invalidExtendedADF
 }
 
 /// Internal 3.5" DD drive DF0 as seen through the CIAs, with an optional ADF disk.
@@ -14,7 +15,8 @@ public enum FloppyError: Error, Equatable {
 public struct FloppyDrive: Equatable, Sendable {
     public static let cylinders = 80
     public static let sectorsPerTrack = 11
-    public static let adfSize = cylinders * 2 * sectorsPerTrack * 512
+    public static let trackSize = sectorsPerTrack * 512
+    public static let adfSize = cylinders * 2 * trackSize
     /// MFM words per track: 11 sectors of 544 words plus a 350-word gap (12,668 bytes).
     public static let trackWords = 6334
 
@@ -22,7 +24,10 @@ public struct FloppyDrive: Equatable, Sendable {
     public private(set) var motorOn = false
     public private(set) var selected = false
     public private(set) var side = 0
+    /// AmigaDOS sector data of the inserted disk (tracks stored raw read as zeros here).
     public private(set) var disk: [UInt8]?
+    /// Tracks of an extended ADF that are stored as raw MFM (copy-protected disks), by track number.
+    public private(set) var rawTracks: [Int: [UInt16]] = [:]
     public var hasDisk: Bool { disk != nil }
     /// Latched disk-change state driving /CHNG.
     public private(set) var diskChanged = true
@@ -30,21 +35,85 @@ public struct FloppyDrive: Equatable, Sendable {
     var rotation = 0
     private var previousControl: UInt8 = 0xFF
 
-    public init(disk: [UInt8]? = nil) {
+    public init(disk: [UInt8]? = nil, rawTracks: [Int: [UInt16]] = [:]) {
         self.disk = disk
+        self.rawTracks = rawTracks
     }
 
-    /// Inserts a raw 901,120-byte AmigaDOS (ADF) image.
+    /// Inserts a disk image: a plain 901,120-byte AmigaDOS ADF (a few trailing bytes are
+    /// ignored) or a UAE extended ADF (`UAE--ADF` or `UAE-1ADF`) with raw MFM tracks.
     public mutating func insert(adf: [UInt8]) throws {
-        guard adf.count == Self.adfSize else { throw FloppyError.invalidADFSize(adf.count) }
-        disk = adf
+        let (sectors, raw) = try Self.parse(adf)
+        disk = sectors
+        rawTracks = raw
         diskChanged = true
     }
 
     public mutating func eject() {
         disk = nil
+        rawTracks = [:]
         diskChanged = true
     }
+
+    static func parse(_ image: [UInt8]) throws -> ([UInt8], [Int: [UInt16]]) {
+        func word(_ offset: Int) -> Int { Int(image[offset]) << 8 | Int(image[offset + 1]) }
+        func long(_ offset: Int) -> Int { word(offset) << 16 | word(offset + 2) }
+        func bytes(_ offset: Int, _ count: Int) -> [UInt8] {
+            let end = min(offset + count, image.count)
+            let slice = offset < end ? Array(image[offset..<end]) : []
+            return slice + [UInt8](repeating: 0, count: count - slice.count)
+        }
+        func words(_ data: [UInt8]) -> [UInt16] {
+            stride(from: 0, to: data.count - 1, by: 2).map { UInt16(data[$0]) << 8 | UInt16(data[$0 + 1]) }
+        }
+        let magic = String(decoding: image.prefix(8), as: UTF8.self)
+        var sectors = [UInt8](repeating: 0, count: adfSize)
+        var raw = [Int: [UInt16]]()
+        func store(dos data: [UInt8], track: Int) {
+            sectors.replaceSubrange(track * trackSize..<(track + 1) * trackSize, with: data)
+        }
+        switch magic {
+        case "UAE--ADF":
+            // 160 entries of sync word and byte length; sync 0 = AmigaDOS data, otherwise
+            // raw MFM that follows that sync word.
+            guard image.count >= 8 + 160 * 4 else { throw FloppyError.invalidExtendedADF }
+            var offset = 8 + 160 * 4
+            for track in 0..<160 {
+                let sync = word(8 + track * 4), length = word(10 + track * 4)
+                if sync == 0 {
+                    store(dos: bytes(offset, trackSize), track: track)
+                } else {
+                    raw[track] = [UInt16(sync)] + words(bytes(offset, length))
+                }
+                offset += length
+            }
+        case "UAE-1ADF":
+            // Track count at 10, then per track: type at +2 (0 AmigaDOS, 1 raw MFM),
+            // stored bytes at +4, length in bits at +8.
+            guard image.count >= 12 else { throw FloppyError.invalidExtendedADF }
+            let count = min(word(10), 160)
+            guard image.count >= 12 + count * 12 else { throw FloppyError.invalidExtendedADF }
+            var offset = 12 + count * 12
+            for track in 0..<count {
+                let header = 12 + track * 12
+                let type = word(header + 2), length = long(header + 4), bits = long(header + 8)
+                if type == 0 {
+                    store(dos: bytes(offset, trackSize), track: track)
+                } else {
+                    let used = bits > 0 ? min((bits + 15) / 16 * 2, length) : length
+                    raw[track] = words(bytes(offset, used))
+                }
+                offset += length
+            }
+        default:
+            guard image.count >= adfSize, image.count < adfSize + 512 else {
+                throw FloppyError.invalidADFSize(image.count)
+            }
+            sectors = Array(image.prefix(adfSize))
+        }
+        return (sectors, raw.filter { !$0.value.isEmpty })
+    }
+
 
     /// Applies a new CIA-B port B value.
     mutating func control(_ value: UInt8) {
@@ -74,7 +143,8 @@ public struct FloppyDrive: Equatable, Sendable {
     /// MFM stream of the track under the head, or nil without a disk.
     public func currentTrack() -> [UInt16]? {
         guard let disk else { return nil }
-        return Self.encodeTrack(disk, track: cylinder * 2 + side)
+        let track = cylinder * 2 + side
+        return rawTracks[track] ?? Self.encodeTrack(disk, track: track)
     }
 
     /// Encodes one track of an ADF image as standard AmigaDOS MFM: per sector two

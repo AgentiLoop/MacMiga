@@ -130,7 +130,7 @@ public struct AmigaMemory: M68KBus {
         ciaB = CIA8520()
         custom = CustomChips(agnus: custom.agnus)
         copper = Copper()
-        drive = FloppyDrive(disk: drive.disk) // a reset does not eject the disk
+        drive = FloppyDrive(disk: drive.disk, rawTracks: drive.rawTracks) // a reset does not eject the disk
         updateDrive()
         // Expansion boards lose their addresses and wait to be configured again.
         expansion.install(fastRAMSize: fastRAM.count, hardDisk: hardDisk != nil)
