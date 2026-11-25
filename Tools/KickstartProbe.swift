@@ -18,6 +18,10 @@ struct KickstartProbe {
         var trace = 0
         var presses: [(frame: Int, key: UInt8)] = []
         var fires: [Int] = []
+        var moves: [(frame: Int, dx: Int, dy: Int)] = []
+        var clicks: [Int] = []
+        var rightHolds: [(frame: Int, frames: Int)] = []
+        var snapshots: [Int] = []
         while paths.count >= 2, paths[0].hasPrefix("--") {
             if paths[0] == "--limit", let value = Int(paths[1]), value > 0 { limit = value }
             else if paths[0] == "--frames" { frameDirectory = paths[1] }
@@ -29,11 +33,15 @@ struct KickstartProbe {
             else if paths[0] == "--chip", let value = Int(paths[1]), [512, 1024, 2048].contains(value) { chipRAM = value << 10 }
             else if paths[0] == "--key", let (frame, key) = Self.keyPress(paths[1]) { presses.append((frame, key)) }
             else if paths[0] == "--fire", let frame = Int(paths[1]) { fires.append(frame) }
+            else if paths[0] == "--mouse", let numbers = Self.numbers(paths[1], count: 3) { moves.append((numbers[0], numbers[1], numbers[2])) }
+            else if paths[0] == "--click", let frame = Int(paths[1]) { clicks.append(frame) }
+            else if paths[0] == "--right", let numbers = Self.numbers(paths[1], count: 2) { rightHolds.append((numbers[0], numbers[1])) }
+            else if paths[0] == "--snapshot", let frame = Int(paths[1]) { snapshots.append(frame) }
             else { break }
             paths.removeFirst(2)
         }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--trace N] [--key FRAME:HEXCODE]... [--fire FRAME]... <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--trace N] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
@@ -47,6 +55,9 @@ struct KickstartProbe {
             print("\(URL(fileURLWithPath: path).lastPathComponent): \(bytes.count) bytes")
             print(String(format: "Reset: SSP=$%08X PC=$%08X", machine.cpu.supervisorStackPointer, machine.cpu.programCounter))
             var completed = 0
+            let name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+            // Mouse counts still to send for each scripted move, a few per frame as a hand would.
+            var pending = moves.map { (dx: $0.dx, dy: $0.dy) }
             do {
                 var frame = -1
                 for _ in 0..<limit {
@@ -61,6 +72,20 @@ struct KickstartProbe {
                     }
                     if fires.contains(frame) { machine.joystick(Joystick(), fire: true) }
                     if fires.contains(frame - 10) { machine.joystick(Joystick(), fire: false) }
+                    if !moves.isEmpty || !clicks.isEmpty || !rightHolds.isEmpty {
+                        // The mouse moves at most 8 counts a frame; the left button is held for 5 frames.
+                        var dx = 0, dy = 0
+                        for index in moves.indices where moves[index].frame <= frame {
+                            let stepX = max(-8, min(8, pending[index].dx)), stepY = max(-8, min(8, pending[index].dy))
+                            pending[index].dx -= stepX; pending[index].dy -= stepY
+                            dx += stepX; dy += stepY
+                        }
+                        machine.mouse(dx: dx, dy: dy, left: clicks.contains { $0 <= frame && frame < $0 + 5 },
+                                      right: rightHolds.contains { $0.frame <= frame && frame < $0.frame + $0.frames })
+                    }
+                    if snapshots.contains(frame), let directory = frameDirectory {
+                        try writePNG(machine.memory.video, to: URL(fileURLWithPath: directory).appendingPathComponent("\(name)-\(frame).png"))
+                    }
                 }
                 print(String(format: "Stopped at the %d-instruction limit at PC=$%08X SR=$%04X; no boot success inferred.", limit, machine.cpu.programCounter, machine.cpu.statusRegister))
                 print(String(format: "Emulated %.2f s; stopped=%@ INTENA=$%04X INTREQ=$%04X DMACON=$%04X", Double(machine.clock) / Double(AmigaMachine.cpuClock), machine.cpu.isStopped ? "yes" : "no", machine.memory.custom.intena, machine.memory.custom.intreq, machine.memory.custom.dmacon))
@@ -106,7 +131,6 @@ struct KickstartProbe {
                 }
             }
             if let directory = frameDirectory {
-                let name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
                 let url = URL(fileURLWithPath: directory).appendingPathComponent(name + ".png")
                 try writePNG(machine.memory.video, to: url)
                 print("Last frame written to \(url.path)")
@@ -159,6 +183,12 @@ struct KickstartProbe {
         let parts = text.split(separator: ":")
         guard parts.count == 2, let frame = Int(parts[0]), let key = UInt8(parts[1], radix: 16) else { return nil }
         return (frame, key)
+    }
+
+    /// Parses `count` integers separated by colons, e.g. `23000:40:-12`.
+    static func numbers(_ text: String, count: Int) -> [Int]? {
+        let values = text.split(separator: ":", omittingEmptySubsequences: false).compactMap { Int($0) }
+        return values.count == count ? values : nil
     }
 
     static func writePNG(_ video: Video, to url: URL) throws {
