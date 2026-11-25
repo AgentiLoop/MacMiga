@@ -658,7 +658,8 @@ the 512 KiB machine. For software that needs the extra chip memory, see
 ## Making a hard disk
 
 ```sh
-swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]... [--skip-long-names] <folder | archive.lha>... <output.hdf>
+swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]... [--auto] [--ofs] [--skip-long-names] <folder | archive.lha>... <output.hdf>
+swift run -c release MakeHardfile --rdb [--fs HEXTYPE:VERSION.REVISION:FILE]... <PARTITION>... <output.hdf>
 swift run -c release MakeHardfile --list <folder | archive.lha>
 swift run -c release MakeHardfile --extract <archive.lha> <new folder>
 ```
@@ -680,15 +681,33 @@ has 2 MiB of free space, or a quarter of its contents if that is more, unless
 everything in it (the path counts from the top of a source, in any case, and
 the option can be repeated). `--skip-long-names` leaves out, and lists, the
 files and directories whose names an Amiga volume cannot hold, instead of
-stopping at the first one.
+stopping at the first one. `--auto` writes a startup-sequence that runs the
+sources' only program when they have exactly one (WHDLoad `.slave` files are
+not counted) and no startup-sequence of their own; `--ofs` writes the old file
+system, for Kickstart 1.x. The app's Machine > New Hard Disk from Folder or LHA…
+does both itself, choosing OFS when the loaded Kickstart is older than 2.0.
+
+`--rdb` puts hardfiles behind a partition table instead (`RigidDiskBuilder`):
+each `NAME=FILE.hdf` becomes a partition byte for byte, `NAME=<MiB>M,type=HEXTYPE`
+an empty one to format on the Amiga, and `,pri=N`, `,noboot`, `,nomount` and
+`,type=HEXTYPE` set its boot priority, flags and DosType (otherwise taken from
+the volume's `DOS\n` signature). Each `--fs` stores a file system program in
+the table. The geometry is 1 head × 32 sectors, the table takes the first two
+cylinders (more if the file systems need it), and partitions follow in the
+order given. For example
+`MakeHardfile --rdb --fs 50465303:19.2:pfs3aio DH0=system.hdf DH1=work.hdf,noboot DH2=pfs.part,type=50465303,noboot disk.hdf`
+made an image from which Kickstart 3.1 booted, writing files to the OFS
+`DH1` and the PFS3 `DH2`, and Kickstart 1.3 booted (with an OFS `DH0`) and
+mounted all three volumes.
 
 `VolumeBuilder.swift` (`FastFileSystem.hardfile`) writes the volume: Fast File
 System (`DOS\1`), 512-byte blocks, root block in the middle, hash-table
 directories with chains in ascending block order, file headers with extension
 blocks, and a bitmap with extension blocks for volumes over 52 MB. Limits:
 names of at most 30 ISO Latin-1 characters without `/` or `:` (anything else
-is an error, nothing is renamed or cut), volumes up to 2 GiB, no links. Kickstart
-1.3's ROM cannot read these volumes (it has only the old file system). From a
+is an error, nothing is renamed or cut), volumes up to 2 GiB, no links. With
+`fastFileSystem: false` it writes the old file system (`DOS\0`, data blocks of
+488 bytes behind a header), which is what Kickstart 1.3's ROM reads. From a
 Mac folder only regular files and directories are taken; symbolic links,
 `.DS_Store` and `._*` files are left out, and dates are modification dates in
 local time.
@@ -1007,7 +1026,10 @@ flags, priorities, long and short environment tables), every rejected case,
 the boot ROM's packet and table entry for each partition, requests anywhere on
 a partitioned disk with its geometry, and the boot ROM's initialisation run by
 the CPU against stand-in exec and expansion libraries that log their calls,
-for Kickstart 2.0+ and for 1.3. For file systems in a partition table they
+for Kickstart 2.0+ and for 1.3, and writing partition tables: volumes kept
+byte for byte, flags and priorities, empty partitions, a table longer than two
+cylinders, file systems read back as the same load files, and rejected names,
+sizes, types and programs. For file systems in a partition table they
 cover the load-file reader (three hunks with long and short relocations, BSS
 and a chip-memory request, laid out as a segment list; six kinds of bad file),
 reading the headers and their `LSEG` chains including damaged ones, and the
@@ -1111,7 +1133,7 @@ compatibility.
    without the floppy (see "AROS without a Kickstart ROM"); use the AROS
    desktop by hand in the app and fix what breaks.
 2. WHDLoad: try more installs and fix what breaks. Hard disk: try an image
-   partitioned on an Amiga, and SFS and the 1.3 Fast File System from a
+   partitioned on an Amiga (MakeHardfile `--rdb` writes tables), and SFS and the 1.3 Fast File System from a
    partition table.
 3. CPU package: address-error details and trace mode; later a 68030/68040 with MMU and FPU for
    NeXT.
