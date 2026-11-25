@@ -242,6 +242,7 @@ private func moveMemory(_ words: [UInt16]) throws -> AmigaMemory {
         var cpu = MC68000()
         cpu.programCounter = 0x100
         cpu[address: 0] = source
+        cpu.stopsOnAddressError = true
         cpu[address: 1] = destination
         let before = cpu
         #expect(throws: MemoryBusError.self) { try cpu.step(memory: &memory) }

@@ -163,6 +163,7 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
         try memory.writeWord(0xFFFF, at: 0x1FFFFE)
         var cpu = MC68000()
         cpu.programCounter = 0xAB000100
+        cpu.stopsOnAddressError = true
         cpu[address: 7] = item.stack
         let before = cpu
         #expect(throws: item.error) { try cpu.step(memory: &memory) }
@@ -179,6 +180,7 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
             var memory = try controlMemory([opcode, UInt16(target >> 16), UInt16(truncatingIfNeeded: target)])
             var cpu = MC68000()
             cpu.programCounter = 0x100
+            cpu.stopsOnAddressError = true
             cpu[address: 7] = 0x400
             try cpu.step(memory: &memory)
             #expect(cpu.programCounter == target)

@@ -16,6 +16,10 @@ public struct MC68000: Equatable, Sendable {
     /// illegal-instruction exception (vector 4, stacked PC = the opcode's address). When true,
     /// `step` throws `CPUError.unsupportedInstruction` instead, for decoder diagnostics.
     public var stopsOnIllegalInstruction = false
+    /// When false (hardware behaviour), a word/long access to an odd address takes the address
+    /// error exception (vector 3, 14-byte group 0 frame). When true, `step` rethrows
+    /// `MemoryBusError.unalignedAddress` instead.
+    public var stopsOnAddressError = false
 
     /// Deterministic host initialization, not a claim about hardware power-on register values.
     public init() {}
@@ -75,7 +79,33 @@ public struct MC68000: Equatable, Sendable {
             try enterException(vector: trap.vector, returnAddress: trap.returnAddress, memory: &memory)
         } catch CPUError.unsupportedInstruction(_, let address) where !stopsOnIllegalInstruction {
             try enterException(vector: 4, returnAddress: address, memory: &memory)
+        } catch MemoryBusError.unalignedAddress(let address) where !stopsOnAddressError {
+            try enterAddressError(accessAddress: address, memory: &memory)
         }
+    }
+
+    /// Group 0 frame (MC68000UM 6.3.9.1), from SSP upwards: special status word (R/W bit 4,
+    /// I/N bit 3 = 0, function code bits 0–2), access address (long), instruction register,
+    /// SR, PC. The stacked PC is the faulting address for an odd opcode fetch, else the
+    /// instruction address + 2 (real hardware stacks a value 2–10 bytes past it). A fault while
+    /// writing this frame (odd SSP) would halt a real 68000; here the bus error is rethrown.
+    private mutating func enterAddressError(accessAddress: UInt32, memory: inout AmigaMemory) throws {
+        let write = memory.unalignedAccessWasWrite
+        let fetch = !write && accessAddress == programCounter & 0xFF_FFFF
+        let opcode = fetch ? 0 : try memory.readWord(at: programCounter)
+        let supervisor: UInt16 = status & 0x2000 != 0 ? 4 : 0
+        let special = (write ? 0 : 0x10) | supervisor | (fetch ? 2 : 1)
+        var next = self
+        next.status = (status | 0x2000) & 0x7FFF
+        let stackPointer = next.supervisorStackPointer &- 14
+        try memory.writeLong(fetch ? programCounter : programCounter &+ 2, at: stackPointer &+ 10)
+        try memory.writeWord(status, at: stackPointer &+ 8)
+        try memory.writeWord(opcode, at: stackPointer &+ 6)
+        try memory.writeLong(accessAddress, at: stackPointer &+ 2)
+        try memory.writeWord(special, at: stackPointer)
+        next.supervisorStackPointer = stackPointer
+        next.programCounter = try memory.readLong(at: 3 * 4)
+        self = next
     }
 
     /// Presents an autovectored interrupt at `level` (1–7). It is accepted when the level is 7

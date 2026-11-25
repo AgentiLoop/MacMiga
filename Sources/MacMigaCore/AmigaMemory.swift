@@ -32,6 +32,9 @@ public struct AmigaMemory {
     public internal(set) var drive = FloppyDrive()
     /// Paula's four audio channels and the mixed host sample stream, driven by `advanceChipset`.
     public var audio = Paula()
+    /// Whether the most recent `unalignedAddress` error came from a write (for the
+    /// 68000 address-error frame's R/W bit).
+    public internal(set) var unalignedAccessWasWrite = false
 
     /// ROM overlay follows CIA-A PA0 (OVL). The line is pulled up, so it is active
     /// while PA0 is still an input after reset.
@@ -183,7 +186,7 @@ public struct AmigaMemory {
     }
 
     public mutating func readWord(at address: UInt32) throws -> UInt16 {
-        try checkAlignment(address)
+        try checkAlignment(address, write: false)
         let physical = address & Self.addressMask
         if isCustomRange(physical) { return custom.readWord(offset: Int(physical & 0x1FE)) }
         let high = try readByte(at: address)
@@ -198,7 +201,7 @@ public struct AmigaMemory {
     }
 
     public mutating func writeWord(_ value: UInt16, at address: UInt32) throws {
-        try checkAlignment(address)
+        try checkAlignment(address, write: true)
         let physical = address & Self.addressMask
         if isCustomRange(physical) {
             custom.writeWord(offset: Int(physical & 0x1FE), value: value)
@@ -209,13 +212,14 @@ public struct AmigaMemory {
     }
 
     public mutating func writeLong(_ value: UInt32, at address: UInt32) throws {
-        try checkAlignment(address)
+        try checkAlignment(address, write: true)
         try writeWord(UInt16(truncatingIfNeeded: value >> 16), at: address)
         try writeWord(UInt16(truncatingIfNeeded: value), at: address &+ 2)
     }
 
-    private func checkAlignment(_ address: UInt32) throws {
+    private mutating func checkAlignment(_ address: UInt32, write: Bool) throws {
         guard address & 1 == 0 else {
+            unalignedAccessWasWrite = write
             throw MemoryBusError.unalignedAddress(address & Self.addressMask)
         }
     }

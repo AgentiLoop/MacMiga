@@ -99,3 +99,32 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
     #expect(try m.readLong(at: 0x7FFC) == 0x100) // stacked PC is the illegal opcode itself
     #expect(try m.readWord(at: 0x7FFA) == 0x0000)
 }
+
+@Test func oddWordWriteTakesAddressErrorWithGroupZeroFrame() throws {
+    // MOVE.W D0,(A0) with A0 odd, in user mode.
+    let (cpu, memory) = try run([0x3080]) { cpu, memory in
+        cpu.statusRegister = 0x0000
+        cpu[address: 0] = 0x301
+        try memory.writeLong(0x3000, at: 3 * 4)
+    }
+    #expect(cpu.programCounter == 0x3000)
+    #expect(cpu.supervisorStackPointer == 0x8000 - 14)
+    var m = memory
+    #expect(try m.readWord(at: 0x7FF2) == 0x0001)   // write, user data space
+    #expect(try m.readLong(at: 0x7FF4) == 0x301)    // access address
+    #expect(try m.readWord(at: 0x7FF8) == 0x3080)   // instruction register
+    #expect(try m.readWord(at: 0x7FFA) == 0x0000)   // SR
+    #expect(try m.readLong(at: 0x7FFC) == 0x102)    // PC
+}
+
+@Test func oddOpcodeFetchTakesAddressError() throws {
+    // BRA.S *+1 lands on an odd PC; the next fetch is a supervisor program-space read fault.
+    let (cpu, memory) = try run([0x60FF], steps: 2) { _, memory in
+        try memory.writeLong(0x3000, at: 3 * 4)
+    }
+    #expect(cpu.programCounter == 0x3000)
+    var m = memory
+    #expect(try m.readWord(at: 0x7FF2) == 0x0016)   // read, supervisor program space
+    #expect(try m.readLong(at: 0x7FF4) == 0x101)
+    #expect(try m.readLong(at: 0x7FFC) == 0x101)
+}

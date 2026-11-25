@@ -193,6 +193,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
 @Test func fetchExtensionAndStackErrorsPreserveCPUState() throws {
     var memory = try cpuMemory([0x6102, 0x4E75])
     var cpu = MC68000()
+    cpu.stopsOnAddressError = true
     for address: UInt32 in [0x101, 0x200000] {
         cpu.programCounter = address
         let before = cpu
@@ -202,6 +203,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
     // Untaken BNE.W still needs its extension word.
     try memory.writeWord(0x6600, at: 0x1FFFFE)
     cpu.programCounter = 0x1FFFFE
+    cpu.stopsOnAddressError = true
     cpu.statusRegister = 0x2704
     var before = cpu
     #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }

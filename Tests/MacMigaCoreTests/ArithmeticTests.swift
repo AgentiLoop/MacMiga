@@ -224,6 +224,7 @@ private func referenceFlags(_ destination: UInt32, _ source: UInt32, size: Int, 
     var memory = try arithmeticMemory([0xD150]) // ADD.W D0,(A0)
     var cpu = MC68000()
     cpu.programCounter = 0x100
+    cpu.stopsOnAddressError = true
     cpu[address: 0] = 0x301
     let before = cpu
     #expect(throws: MemoryBusError.unalignedAddress(0x301)) { try cpu.step(memory: &memory) }
