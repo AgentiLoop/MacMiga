@@ -180,3 +180,36 @@ private func syntheticROM(size: Int = 256 * 1024) -> [UInt8] {
     var memory = try AmigaMemory(kickstart: syntheticROM())
     #expect(throws: MemoryBusError.unmappedAddress(0x20_0000)) { try memory.readByte(at: 0x20_0000) }
 }
+
+@Test func extendedROMAnswersAtE00000AndIsReadOnly() throws {
+    var extended = [UInt8](repeating: 0, count: 512 * 1024)
+    extended.replaceSubrange(0..<4, with: [0x11, 0x14, 0x4E, 0xF9])
+    extended[extended.count - 1] = 0x5A
+    var memory = try AmigaMemory(kickstart: syntheticROM(), extendedROM: extended)
+    #expect(memory.hasExtendedROM)
+    #expect(try memory.readLong(at: 0xE0_0000) == 0x1114_4EF9)
+    #expect(try memory.readByte(at: 0xE7_FFFF) == 0x5A)
+    try memory.writeLong(0xFFFF_FFFF, at: 0xE0_0000)
+    try memory.writeByte(0, at: 0xE7_FFFF)
+    #expect(try memory.readLong(at: 0xE0_0000) == 0x1114_4EF9)
+    #expect(try memory.readByte(at: 0xE7_FFFF) == 0x5A)
+    // The autoconfig window above it and the Kickstart are where they were; a reset keeps the ROM.
+    #expect(try memory.readLong(at: 0xE8_0000) == 0)
+    #expect(try memory.readWord(at: 0xF8_0000) == UInt16(syntheticROM()[0]) << 8 | UInt16(syntheticROM()[1]))
+    _ = try memory.reset()
+    #expect(try memory.readLong(at: 0xE0_0000) == 0x1114_4EF9)
+
+    // Without one, nothing answers there.
+    var plain = try AmigaMemory(kickstart: syntheticROM())
+    #expect(!plain.hasExtendedROM)
+    #expect(throws: MemoryBusError.unmappedAddress(0xE0_0000)) { try plain.readByte(at: 0xE0_0000) }
+    #expect(throws: MemoryBusError.invalidROMSize(1000)) {
+        try AmigaMemory(kickstart: syntheticROM(), extendedROM: [UInt8](repeating: 0, count: 1000))
+    }
+    #expect(throws: MemoryBusError.invalidROMSize(256 * 1024)) {
+        try AmigaMemory(kickstart: syntheticROM(), extendedROM: [UInt8](repeating: 0, count: 256 * 1024))
+    }
+    // The machine passes it on.
+    let machine = try AmigaMachine(kickstart: syntheticROM(), extendedROM: extended)
+    #expect(machine.memory.hasExtendedROM)
+}

@@ -20,6 +20,9 @@ public struct AmigaMemory: M68KBus {
     /// The ROM overlay hides the first 512 KiB, whatever the size of chip RAM.
     private static let overlaySize: UInt32 = 0x8_0000
     private let kickstart: [UInt8]
+    /// Extended ROM at `$E00000`–`$E7FFFF` (512 KiB), empty when none is fitted.
+    private let extendedROM: [UInt8]
+    public var hasExtendedROM: Bool { !extendedROM.isEmpty }
     var chipRAM: [UInt8]
     /// 512 KiB with the OCS Agnus, 1 or 2 MiB with the ECS Agnus.
     public var chipRAMSize: Int { chipRAM.count }
@@ -64,11 +67,18 @@ public struct AmigaMemory: M68KBus {
     /// 512 KiB models the common A500 + A501 trapdoor expansion. `fastRAMSize` is 0 or a
     /// power of two from 64 KiB to 8 MiB on a Zorro II board; `hardDisk` fits the
     /// hard-disk controller board. Kickstart configures both boards during startup.
-    public init(kickstart: [UInt8], chipRAMSize: Int = 512 * 1024, slowRAMSize: Int = 512 * 1024,
-                fastRAMSize: Int = 0, hardDisk: HardDisk? = nil) throws {
+    /// `extendedROM` is empty or a 512 KiB image for `$E00000`, where the A500 has nothing
+    /// and later machines (CDTV, CD32) and replacement systems such as AROS keep the second
+    /// half of a 1 MiB ROM.
+    public init(kickstart: [UInt8], extendedROM: [UInt8] = [], chipRAMSize: Int = 512 * 1024,
+                slowRAMSize: Int = 512 * 1024, fastRAMSize: Int = 0, hardDisk: HardDisk? = nil) throws {
         guard kickstart.count == 256 * 1024 || kickstart.count == 512 * 1024 else {
             throw MemoryBusError.invalidROMSize(kickstart.count)
         }
+        guard extendedROM.isEmpty || extendedROM.count == 512 * 1024 else {
+            throw MemoryBusError.invalidROMSize(extendedROM.count)
+        }
+        self.extendedROM = extendedROM
         precondition([0x8_0000, 0x10_0000, 0x20_0000].contains(chipRAMSize))
         self.chipRAM = [UInt8](repeating: 0, count: chipRAMSize)
         self.custom = CustomChips(agnus: chipRAMSize > 0x8_0000 ? .ecs : .ocs)
@@ -184,6 +194,10 @@ public struct AmigaMemory: M68KBus {
         physical >= 0xA0_0000 && physical < 0xC0_0000
     }
 
+    private func isExtendedROM(_ physical: UInt32) -> Bool {
+        physical >= 0xE0_0000 && physical < 0xE8_0000 && !extendedROM.isEmpty
+    }
+
     public mutating func readByte(at address: UInt32) throws -> UInt8 {
         let physical = address & Self.addressMask
         if physical >= 0xF8_0000 {
@@ -199,6 +213,7 @@ public struct AmigaMemory: M68KBus {
             return fastRAM[Int(physical - fastRAMBase)]
         }
         if isSlowRAM(physical) { return slowRAM[Int(physical - 0xC0_0000)] }
+        if isExtendedROM(physical) { return extendedROM[Int(physical - 0xE0_0000)] }
         if Self.isEmptyDiagnosticSlot(physical) { return 0 }
         if Self.isCIARange(physical) {
             let register = Int(physical >> 8) & 0xF
@@ -219,7 +234,7 @@ public struct AmigaMemory: M68KBus {
 
     public mutating func writeByte(_ value: UInt8, at address: UInt32) throws {
         let physical = address & Self.addressMask
-        if physical >= 0xF8_0000 || Self.isEmptyDiagnosticSlot(physical) { return }
+        if physical >= 0xF8_0000 || Self.isEmptyDiagnosticSlot(physical) || isExtendedROM(physical) { return }
         if physical < Self.chipRAMSpace {
             if !(overlayEnabled && physical < Self.overlaySize) {
                 chipRAM[Int(physical) & (chipRAM.count - 1)] = value
