@@ -547,7 +547,9 @@ and sectors from the Rigid Disk Block.
 Rejected with an error: a table or partition block with a bad checksum or ID,
 a chain that loops or leaves the image, a block size other than 512 bytes, a
 partition that extends past the end of the image, and a table with nothing to
-mount. Drive-init code is ignored.
+mount. Drive-init code (`rdb_DriveInit`, a program a real controller's ROM
+may run to set up the physical drive) is deliberately not run: it talks to
+drive hardware MacMiga does not have, and no image tried so far carries any.
 
 Bad-block lists (`BADB` blocks, each with up to 61 pairs of a bad block and its
 replacement) are honoured the way a controller's driver does it: a read or
@@ -628,9 +630,19 @@ this repository.
 | The app with Kickstart 3.1 and the same disk, after 25 seconds at warp speed | the window showed the three lines of the PFS3 partition's script |
 
 The screen texts were read from saved frames by OCR. Not tried: a table with
-several file systems on a real Kickstart (the unit tests cover it), SFS, the
-Fast File System from a Workbench disk under Kickstart 1.3, and Workbench
-itself on such a disk.
+several file systems on a real Kickstart (the unit tests cover it), the Fast
+File System from a Workbench disk under Kickstart 1.3, and Workbench itself on
+such a disk.
+
+SFS (Smart File System) cannot run on MacMiga, which emulates a 68000: every
+m68k version needs a 68020. Tried with `MakeHardfile --rdb`, a `DH0` whose
+startup-sequence runs `SFSformat`, and an empty `SFS\0` partition `DH1`, on
+Kickstart 3.1 with 8 MiB fast RAM: the table's file system was installed and
+its handler started, then failed with "Software Failure … Program failed" —
+SFS 1.279 (Aminet `disk/misc/SFS.lha`) at a `BSR.L` (`$61FF`, an address error
+on a 68000) and the original SFS 1.84 (amiga-stuff.com) at a `MULU.L`
+(`$4C41`, an illegal instruction). A real 68000 Amiga fails the same way. SFS
+waits for a 68020 CPU (see "Next milestones").
 
 The probe now prints the file systems of the table, the entries of
 `FileSystem.resource`, and DOS's devices (with the segment list and whether
@@ -1152,9 +1164,10 @@ compatibility.
    without the floppy (see "AROS without a Kickstart ROM"); use the AROS
    desktop by hand in the app and fix what breaks.
 2. WHDLoad: try more installs and fix what breaks. Hard disk: try an image
-   partitioned on an Amiga (MakeHardfile `--rdb` writes tables), and SFS and the 1.3 Fast File System from a
-   partition table.
-3. CPU package: address-error details and trace mode; later a 68030/68040 with MMU and FPU for
+   partitioned on an Amiga (MakeHardfile `--rdb` writes tables), and the 1.3 Fast
+   File System from a partition table (needs Workbench 1.3's `L:FastFileSystem`).
+3. CPU package: address-error details and trace mode; then a 68020 (SFS and
+   other 68020-only software need it); later a 68030/68040 with MMU and FPU for
    NeXT.
 4. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
    what breaks.
