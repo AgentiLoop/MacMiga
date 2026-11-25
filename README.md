@@ -4,9 +4,9 @@ A work-in-progress Commodore Amiga 500 emulator for macOS.
 
 **Current milestone: booting from ADF floppy images.** Both local Kickstart
 ROMs draw their insert-disk screens and boot a bootblock from an ADF disk image,
-which then reads further sectors through trackdisk.device. There is no
-audio yet. The `MacMiga` app shows the emulated display in a window and
-forwards the Mac keyboard and mouse. Booting real AmigaOS
+which then reads further sectors through trackdisk.device. Paula audio is
+emulated and played through the Mac's default output. The `MacMiga` app shows
+the emulated display in a window and forwards the Mac keyboard and mouse. Booting real AmigaOS
 Workbench disks or games has not been tested.
 
 ## Run the app
@@ -24,7 +24,9 @@ tick on the main thread. Keys map by US-layout position to Amiga raw codes
 go to the menu instead, so the Amiga keys only work as plain modifiers. Mouse
 motion inside the window is sent as relative counts and the Mac cursor is not
 captured, so the Amiga pointer and Mac cursor are not aligned. No joystick
-mapping, audio, or settings yet. Verified on November 25, 2026 by launching it
+mapping or settings yet. Audio plays through AVAudioEngine at the output
+device's sample rate with at most ~100 ms queued; silence is inserted when the
+emulator falls behind. Verified on November 25, 2026 by launching it
 with Kickstart 3.1 and screen-capturing the window, which showed the
 insert-disk screen; keyboard and mouse input in the app were not tested by hand.
 
@@ -136,6 +138,21 @@ not 68000 timing. That time advances the beam (1 colour clock = 2 CPU clocks;
 VERTB each frame) and both CIA timers (1 E clock = 10 CPU clocks). CIA-A TOD
 counts frames, CIA-B TOD counts lines. CIA-A /IRQ sets INTREQ PORTS (level 2),
 CIA-B /IRQ sets INTREQ EXTER (level 6).
+
+## Audio (Paula)
+
+`Sources/MacMigaCore/Paula.swift` runs four channels every colour clock.
+AUDnLC/LEN/PER/VOL/DAT live at `$DFF0A0 + n*$10`. With DMACON DMAEN and AUDnEN
+set, a channel loads LC/LEN, raises its INTREQ bit (7+n) so software can queue
+the next block, then plays the block's bytes high byte first, one per period
+(colour clocks). After a block's last word it reloads LC/LEN and interrupts
+again; clearing AUDnEN silences it. Without DMA, a CPU write to AUDnDAT plays
+the word's two bytes and then interrupts. Channels 0 and 3 mix left, 1 and 2
+right (sample × volume, 0–64), box-filtered down to the host rate into
+`memory.audio.samples` (`drainSamples()`). Not modelled: ADKCON
+modulation, the low-pass filter (CIA-A PA1), and audio DMA slot timing. Covered
+by unit tests only — no Amiga software making sound has been run yet, as
+neither Kickstart plays sound before a disk boots.
 
 ## Video, Copper and Blitter
 
@@ -266,9 +283,9 @@ validate ROM identity, checksum, or software compatibility.
 ## Next milestones
 
 1. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
-   what breaks; audio (Paula channels).
+   what breaks.
 2. Remaining CPU pieces: ABCD/SBCD/NBCD, CHK, MOVEP, bus/address errors, timing.
-3. OCS custom chips: sprites, DMA slot timing, and audio.
+3. OCS custom chips: DMA slot timing, audio modulation and filter.
 4. Disk writes, extra drives, index pulses and accurate disk timing.
 5. Native macOS display/audio interface and user-selected firmware/media.
 6. Verify boot and software compatibility using authorized firmware and media.
