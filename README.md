@@ -2,9 +2,11 @@
 
 A work-in-progress Commodore Amiga 500 emulator for macOS.
 
-**Current milestone: memory and initial CPU execution.** The core executes a
-small MC68000 instruction subset, but has no application UI, chipset, or
-peripherals yet. MacMiga does not boot AmigaOS or run games.
+**Current milestone: most of the MC68000 instruction set, CIAs and chipset
+registers.** Both local Kickstart ROMs now run their startup code until they
+wait in user mode for interrupts, which are not delivered yet. There is no
+application UI, video, audio or floppy yet. MacMiga does not boot AmigaOS or
+run games.
 
 ## Build and test
 
@@ -25,10 +27,17 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
 
 `Sources/MacMigaCore/AmigaMemory.swift` provides:
 
-- 512 KiB zero-initialized RAM at `$000000`–`$07FFFF` when overlay is disabled.
+- 512 KiB zero-initialized chip RAM at `$000000`–`$07FFFF`, repeated through
+  `$1FFFFF` (the chip-RAM space Gary routes to Agnus).
+- 512 KiB slow RAM at `$C00000`–`$C7FFFF` by default (A500 + A501 trapdoor
+  expansion; `slowRAMSize: 0` gives a stock 512 KiB machine). The rest of
+  `$C00000`–`$D7FFFF` mirrors the custom chip registers, which Kickstart detects
+  by writing INTENA through it.
+- The Zorro II autoconfig window `$E80000`–`$EFFFFF` is empty (no expansion
+  boards): reads return 0 and writes are ignored.
 - A 512 KiB ROM window at `$F80000`–`$FFFFFF`, accepting 256 KiB images
   mirrored within that window or a full 512 KiB image.
-- A power-on ROM overlay over the first 512 KiB, controlled by CIA-A PA0 (OVL,
+- A power-on ROM overlay over the first 512 KiB only, controlled by CIA-A PA0 (OVL,
   pulled up while PA0 is an input). Writes to ROM-selected addresses are ignored.
 - Both CIAs (`CIA8520.swift`) decoded across `$A00000`–`$BFFFFF`: CIA-A on odd
   bytes when A12 is low, CIA-B on even bytes when A13 is low, register from
@@ -58,7 +67,7 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
 ROM validation checks size only, not contents, checksum, or compatibility.
 Unimplemented addresses throw explicit errors rather than returning fake
 peripheral data. This is a deliberately bounded CPU-side memory subset, not a
-complete Gary/Agnus decoder: additional RAM mirrors, expansion memory, open-bus
+complete Gary/Agnus decoder: Zorro expansion memory, open-bus
 behavior, DMA arbitration, and cycle timing remain unimplemented. Multiword
 writes happen in order and are not rolled back if a subsequent access fails.
 Swift errors are not yet translated into CPU bus/address-error exceptions.
@@ -67,23 +76,34 @@ Swift errors are not yet translated into CPU bus/address-error exceptions.
 
 `Sources/MacMigaCore/MC68000.swift` implements D0–D7, A0–A7, banked
 user/supervisor stack pointers, status bits, and external reset-vector loading.
-The supported instructions are MOVE.B/W/L, MOVEA.W/L, LEA, JMP, JSR, MOVEQ,
-ADD/ADDA/ADDQ, SUB/SUBA/SUBQ, CMP/CMPA/CMPI, DBcc, NOP, BRA, BSR, all 14 Bcc
-conditions, and RTS.
+The supported instructions are MOVE.B/W/L, MOVEA.W/L, LEA, PEA, JMP, JSR,
+MOVEQ, ADD/ADDA/ADDQ/ADDI/ADDX, SUB/SUBA/SUBQ/SUBI/SUBX, CMP/CMPA/CMPI/CMPM,
+NEG/NEGX/CLR/NOT/TST/TAS, AND/OR/EOR and their immediate forms (including to
+CCR/SR), BTST/BCHG/BCLR/BSET, ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR (register and
+memory), MULU/MULS/DIVU/DIVS, SWAP, EXT, EXG, MOVEM, MOVE to/from SR and CCR,
+MOVE USP, LINK/UNLK, Scc, DBcc, Bcc/BRA/BSR, RTS, RTR, RTE, TRAP, TRAPV, RESET
+(no device reset) and NOP. Not implemented: ABCD/SBCD/NBCD, CHK, MOVEP, STOP.
 MOVE supports register direct,
 indirect, postincrement, predecrement, displacement, brief indexed, absolute,
 PC-relative source, and immediate source addressing. LEA, JMP, and JSR accept
 only control addressing modes and preserve condition codes. ADD and SUB set
 X, N, Z, V, and C; address-register destinations (ADDA/SUBA and ADDQ/SUBQ to
-An) use all 32 bits and leave flags unchanged. ADDX/SUBX are not implemented.
+An) use all 32 bits and leave flags unchanged. ADDX/SUBX/NEGX only clear Z.
 Compares set N, Z, V, and C and leave X unchanged; CMPA compares all 32 bits
-with a sign-extended word source. CMPM is not implemented. DBcc decrements only
+with a sign-extended word source. DBcc decrements only
 the low word of Dn and leaves flags unchanged.
+DIVU/DIVS overflow sets V, clears C and leaves N and Z unchanged (an assumption;
+the 68000 leaves them undefined).
 Branches support byte and word displacements. Unsupported opcodes throw an
 opcode/address diagnostic.
 
+Exceptions: TRAP #n, TRAPV, privilege violation, divide by zero, ILLEGAL, line A,
+line F, and MOVEC (68010+, executed by Kickstart to detect the CPU) are processed
+the 68000 way: SR and the return PC are pushed on the supervisor stack and the
+CPU jumps through the vector table.
+
 This is functional stepping, not cycle-accurate emulation. Prefetch, interrupts,
-trace and other exceptions, and the remaining instruction set are absent.
+trace, and bus/address-error exceptions are absent.
 CPU registers remain unchanged on a thrown error, but earlier bus writes are
 not rolled back. Odd branch targets fail on the next fetch. Initial register
 values are deterministic host defaults, not hardware power-on guarantees.
@@ -92,7 +112,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-Sixty-nine tests cover the memory foundation and CPU subset. Coverage includes
+Eighty-six tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -109,7 +129,12 @@ CIA tests cover port/direction mixing, A12/A13 byte-lane decoding and mirrors,
 the Kickstart overlay-off sequence, timer latch/underflow/one-shot/force-load
 and cascade, TOD halt/latch/alarm, and ICR masking. Custom-chip tests cover
 set/clear registers, unsplit word writes, mirrors, interrupt priorities, the
-beam counter, and the empty Gayle range.
+beam counter, and the empty Gayle range. Logic/shift tests cover bit operations,
+immediates and CCR/SR forms, single-operand instructions, NEG/NEGX flags,
+logic, multiply/divide (including overflow), every shift/rotate type, MOVEM,
+LINK/UNLK/PEA/Scc/status moves, CMPM, ADDX/SUBX chains, TRAP/RTE and the
+exception vectors. Memory tests cover chip-RAM mirrors, slow RAM, the custom
+chip mirror, and the empty autoconfig window.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -127,24 +152,25 @@ The probe stops at the first diagnostic or after `--limit` instructions
 the limit does not establish boot success. The two local files tested on
 November 25, 2026 were each 524,288 bytes. Their measured startup results:
 
-| File | Reset PC | Stop point | Completed instructions |
-| --- | --- | --- | --- |
-| kickstart-1.3.rom | $00FC00D2 | unsupported $0800 (BTST #imm) at $00FC0150 | 262,263 |
-| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | unsupported $4239 (CLR.B abs.L) at $00F8015A | 429,172 |
+| File | Reset PC | Result with `--limit 50000000` |
+| --- | --- | --- |
+| kickstart-1.3.rom | $00FC00D2 | no error; at the limit in user mode around $00FCAFA6–$00FCAFB8 |
+| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | no error; at the limit in user mode around $00F87DEE–$00F87DF6 |
 
-Measured with `--limit 50000000`. Both ROMs pass their startup delay loops and
-the empty diagnostic slot. Kickstart 1.3 turns the overlay off through CIA-A
-and initialises custom-chip registers; 3.1 passes its Gayle probe. Both now stop
-on unimplemented CPU instructions.
+Both ROMs pass the delay loops, diagnostic slot, overlay switch-off, chip and
+slow RAM sizing, Gayle probe and autoconfig scan, then drop to user mode and
+stay in short loops. Waiting for interrupts is my reading of that, not yet
+confirmed by disassembly; nothing delivers interrupts or advances timers yet.
 
 Neither ROM booted. The probe reports raw reset-vector values and does not
 validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. CPU work the ROMs now need: bit operations (BTST/BSET/BCLR/BCHG), CLR/NEG/NOT/
-   TST, logic, shifts, then exceptions, interrupts and timing.
-2. Drive CIA timers/TOD from emulated time and route CIA interrupts (INT2/INT6).
+1. A machine loop: advance the beam and CIA timers/TOD from CPU time, route CIA
+   interrupts (INT2/INT6) into INTREQ, and deliver autovectored interrupts to
+   the CPU (plus STOP).
+2. Remaining CPU pieces: ABCD/SBCD/NBCD, CHK, MOVEP, bus/address errors, timing.
 3. OCS custom chips: raster timing, DMA, bitplanes, Copper, Blitter, and audio.
 4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
 5. Native macOS display/audio interface and user-selected firmware/media.
