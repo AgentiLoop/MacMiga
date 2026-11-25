@@ -30,6 +30,8 @@ file that is not writable is attached write-protected). Machine ▸ New Hard Dis
 from Folder or LHA… asks for a folder or archive and for where to save the new
 `.hdf`, builds it and attaches it. Machine ▸ 8 MB Fast RAM
 adds a Zorro II memory board (off by default, remembered, restarts the machine).
+Machine ▸ 1 MB Chip RAM (ECS Agnus) doubles chip RAM and swaps the Agnus (same
+rules; see "Chip RAM and the ECS Agnus").
 
 With no arguments it reuses the last ROM, or `Kickstart ROMs/kickstart-1.3.rom`
 in the current folder, or asks for one. The Machine menu opens a Kickstart ROM
@@ -68,7 +70,8 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
 `Sources/MacMigaCore/AmigaMemory.swift` provides:
 
 - 512 KiB zero-initialized chip RAM at `$000000`–`$07FFFF`, repeated through
-  `$1FFFFF` (the chip-RAM space Gary routes to Agnus).
+  `$1FFFFF` (the chip-RAM space Gary routes to Agnus). `chipRAMSize:` can make
+  it 1 MiB or 2 MiB instead; see "Chip RAM and the ECS Agnus".
 - 512 KiB slow RAM at `$C00000`–`$C7FFFF` by default (A500 + A501 trapdoor
   expansion; `slowRAMSize: 0` gives a stock 512 KiB machine). The rest of
   `$C00000`–`$D7FFFF` mirrors the custom chip registers, which Kickstart detects
@@ -92,7 +95,9 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
   read-back registers, Paula interrupt-level priority, a PAL beam counter for
   VPOSR/VHPOSR that raises VERTB each frame, and storage of all other writes.
   Word accesses are not split; a byte write appears on both bus halves. No DMA,
-  video, audio, Blitter or Copper behaviour yet. Write-only registers read 0 (real hardware: bus noise).
+  video, audio, Blitter or Copper behaviour yet. Write-only registers read 0 (real hardware: bus noise),
+  except DENISEID (`$07C`), which reads `$FFFF`: the OCS Denise has no ID
+  register, and a low byte of 0 made Kickstart 3.1 detect an ECS Denise.
 - `$D80000`–`$DFEFFF` (RTC, A600 Gayle/IDE on other models) is empty on a stock
   A500 here: reads return 0 and writes are ignored.
 - The `$F00000`–`$F7FFFF` diagnostic-cartridge slot is empty: reads return 0
@@ -259,6 +264,42 @@ exec's memory list. In the app, the same FFS hardfile booted under Kickstart
 3.1 and the file on disk received the same changed blocks. No Workbench
 installation has been tried.
 
+## Chip RAM and the ECS Agnus
+
+The stock machine has 512 KiB of chip RAM and the OCS Agnus (8371), which
+cannot address more. `chipRAMSize:` (probe `--chip 1024` or `--chip 2048`, app
+Machine ▸ 1 MB Chip RAM) fits 1 MiB or 2 MiB together with an ECS Agnus, as in
+late A500s with the 8372A. Denise and Paula stay OCS. Slow RAM is a separate
+setting and stays at 512 KiB unless changed (on a real A500 the 1 MiB of chip
+RAM is usually made by remapping the trapdoor RAM).
+
+What the ECS Agnus changes here: the ID in VPOSR bits 14–8 reads `$20` instead
+of `$00`; every DMA pointer (Copper, bitplanes, sprites, Blitter, disk, audio)
+reaches all of chip RAM; and three Blitter registers exist: BLTCON0L (`$05A`,
+the minterm byte of BLTCON0), BLTSIZV (`$05C`) and BLTSIZH (`$05E`) for blits
+up to 32,768 lines by 2,048 words, started by the BLTSIZH write. With the OCS
+Agnus those three addresses do nothing. Not modelled: BEAMCON0 and the
+programmable beam registers (stored without effect; the beam is always PAL)
+and DIWHIGH.
+
+Measured with the probe on November 25, 2026 (60,000,000 instructions, no
+disk), reading exec's memory list and graphics.library's chip revision byte
+out of the running system:
+
+| Chip RAM | Kickstart 3.1 | Kickstart 1.3 |
+| --- | --- | --- |
+| 512 KiB | chip memory `$000420`–`$080000`; ChipRevBits0 `$00` (no ECS chip) | chip memory `$000420`–`$080000` |
+| 1 MiB | chip memory to `$100000`; ChipRevBits0 `$01` (ECS Agnus, OCS Denise) | chip memory to `$100000` |
+| 2 MiB | chip memory to `$200000`; ChipRevBits0 `$01` | chip memory to `$200000` |
+
+The saved insert-disk frames are identical for all three sizes with each ROM.
+That needed BLTCON0L: Kickstart 3.1 draws its text through that register once
+it has found an ECS Agnus, and without it the four lines of text on the
+insert-disk screen were missing. Kickstart 3.1 used BLTCON0L, BLTSIZV and
+BLTSIZH in these runs. Before the DENISEID change, ChipRevBits0 read `$12` on
+the 512 KiB machine. For software that needs the extra chip memory, see
+"WHDLoad".
+
 ## Making a hard disk
 
 ```sh
@@ -338,11 +379,21 @@ and 512 KiB of expansion memory:
 | without `PRELOAD` | the game started, and after two fire presses F10 returned to the `1>` prompt in the same way |
 | 1, 2 or 4 MiB fast RAM | the game started |
 | no fast RAM (512 KiB chip + 512 KiB slow) | WHDLoad's own requester: "Can't allocate ExpMem." with Retry and Cancel |
+| 1 MiB chip RAM (ECS Agnus), 8 MiB fast RAM | the game started as with 512 KiB |
 
-Not tried: any other install, installs that need a Kickstart image file, more
-than 512 KiB of chip memory or a 68020, saving to disk from a game, starting
-from a Workbench icon, and WHDLoad in the app window (the app runs the same
-core as the probe).
+No install that needs more than 512 KiB of chip memory was at hand, so a copy
+of the Pac-Man slave was changed (in the test disk image only) to ask for
+1 MiB of chip memory:
+
+| Run | Result |
+| --- | --- |
+| 512 KiB chip RAM | WHDLoad's own requester, its text ending "need chipmem up to $100000" |
+| 1 MiB chip RAM | the game started (maze drawn, executing from fast RAM); F10 returned to the `1>` prompt with nothing written to the disk, and exec again listed chip memory to `$100000` |
+
+Not tried: any other install, installs that need a Kickstart image file or a
+68020, a real install that needs more than 512 KiB of chip memory, saving to
+disk from a game, starting from a Workbench icon, and WHDLoad in the app
+window (the app runs the same core as the probe).
 
 ## Audio (Paula)
 
@@ -375,7 +426,7 @@ registers in effect at the end of a line apply to the whole line. Collisions,
 interlace and DMA slot contention are not implemented.
 
 `Blitter.swift` runs a blit as soon as BLTSIZE is written (with DMAEN and
-BLTEN): area mode with A/B/C/D channels, shifts, first/last-word masks, all 256
+BLTEN; with an ECS Agnus also BLTSIZH): area mode with A/B/C/D channels, shifts, first/last-word masks, all 256
 minterms, descending mode, modulos, inclusive/exclusive fill with FCI, and line
 mode (octants, SING). BZERO is set and INTREQ BLIT raised on completion; BBUSY
 never reads 1. Line texture bit order is unverified.
@@ -412,7 +463,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-One hundred and forty-seven tests cover the memory foundation and CPU subset. Coverage includes
+One hundred and fifty-two tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -460,6 +511,11 @@ size class up to several extension blocks, hash chains, nested and empty
 directories, metadata, a bitmap that marks exactly the unused blocks, bitmap
 extension blocks, name and conflict errors, a Mac folder turned into
 entries and into a hardfile, and a folder and an archive merged into one volume.
+Chip RAM tests cover the three sizes and their mirrors, the overlay and reset
+with 1 MiB, the Agnus ID, a Blitter copy and a Copper list above 512 KiB (and
+their wrap-around with 512 KiB), BLTCON0L, blits taller than 1,024 lines and
+wider than 64 words through BLTSIZV/BLTSIZH, and that the OCS Agnus ignores
+those registers. A custom-chip test covers the DENISEID read.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -468,12 +524,16 @@ These tests establish the implemented contract, not Amiga software compatibility
 ROMs remain user-supplied and ignored by Git. From the repository root:
 
 ```sh
-swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--key FRAME:HEXCODE]... [--fire FRAME]... "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--key FRAME:HEXCODE]... [--fire FRAME]... "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
 ```
 
 `--hdf` attaches a hardfile as DH0 (the file itself is never modified;
-`--hdf-out` writes the image as the Amiga left it), `--fast` adds fast RAM. The
+`--hdf-out` writes the image as the Amiga left it), `--fast` adds fast RAM,
+`--chip` sets chip RAM in KiB. The
 probe then also prints the expansion boards and the blocks read and written.
+When exec is running at the end, it prints exec's memory list, and for
+Kickstart 2.0 and newer graphics.library's ChipRevBits0 (which chips Kickstart
+found).
 `--key 4000:59` presses the key with Amiga raw code `$59` (F10) at frame 4000
 for 5 frames; `--fire 2600` holds the port-2 fire button for 10 frames.
 
@@ -510,8 +570,7 @@ compatibility.
 
 ## Next milestones
 
-1. WHDLoad: try more installs and fix what breaks; 1 MiB of chip memory (ECS
-   Agnus) for installs that ask for it; Rigid Disk Block images.
+1. WHDLoad: try more installs and fix what breaks; Rigid Disk Block images.
 2. CPU package: move the instruction-level tests onto a plain RAM bus inside
    `Packages/M68K`; later a 68030/68040 with MMU and FPU for NeXT.
 3. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
