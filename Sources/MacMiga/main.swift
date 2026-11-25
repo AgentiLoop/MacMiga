@@ -11,6 +11,8 @@ import UniformTypeIdentifiers
 final class Emulator {
     private(set) var machine: AmigaMachine?
     private(set) var romURL: URL?
+    /// The second ROM, at `$E00000`; AROS's own ROM comes as two files. Nil for a Kickstart.
+    private(set) var extendedROMURL: URL?
     private(set) var diskURL: URL?
     private var disk: [UInt8]?
     /// Hard disk image on the controller board (DH0); changed blocks are saved back to its file.
@@ -23,19 +25,22 @@ final class Emulator {
     var onError: ((String) -> Void)?
     let audio = AudioOutput()
 
-    func load(rom url: URL) throws {
-        var machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)),
+    func load(rom url: URL, extended: URL?) throws {
+        let extendedROM = try extended.map { Array(try Data(contentsOf: $0)) } ?? []
+        var machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)), extendedROM: extendedROM,
                                        chipRAMSize: bigChipRAM ? 1 << 20 : 512 << 10,
                                        fastRAMSize: fastRAM ? 8 << 20 : 0, hardDisk: hardDisk)
         if let audio { machine.memory.audio.sampleRate = audio.sampleRate }
         self.machine = machine
         romURL = url
+        extendedROMURL = extended
         UserDefaults.standard.set(url.path, forKey: "kickstartPath")
+        UserDefaults.standard.set(extended?.path, forKey: "extendedROMPath")
         if let disk { try self.machine?.memory.insertDisk(adf: disk) }
     }
 
     func reset() throws {
-        if let romURL { try load(rom: romURL) }
+        if let romURL { try load(rom: romURL, extended: extendedROMURL) }
     }
 
     func insert(adf url: URL) throws {
@@ -411,10 +416,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let arguments = Array(CommandLine.arguments.dropFirst())
         let isMedia = { (path: String) in path.lowercased().hasSuffix(".adf") || path.lowercased().hasSuffix(".hdf") }
-        let romPath = arguments.first { !isMedia($0) }
-            ?? UserDefaults.standard.string(forKey: "kickstartPath")
-            ?? ["Kickstart ROMs/kickstart-1.3.rom"].first { FileManager.default.fileExists(atPath: $0) }
-        if let romPath { open(rom: URL(fileURLWithPath: romPath)) } else { chooseROM() }
+        // ROM files come before any `-Option value` pairs: the Kickstart, then an extended ROM.
+        let roms = arguments.prefix { !$0.hasPrefix("-") }.filter { !isMedia($0) }
+        if let romPath = roms.first {
+            open(rom: URL(fileURLWithPath: romPath), extended: roms.dropFirst().first.map { URL(fileURLWithPath: $0) })
+        } else if let romPath = UserDefaults.standard.string(forKey: "kickstartPath")
+                    ?? ["Kickstart ROMs/kickstart-1.3.rom"].first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            open(rom: URL(fileURLWithPath: romPath),
+                 extended: UserDefaults.standard.string(forKey: "extendedROMPath").map { URL(fileURLWithPath: $0) })
+        } else {
+            chooseROM()
+        }
         if let adf = arguments.first(where: { $0.lowercased().hasSuffix(".adf") }) {
             insert(adf: URL(fileURLWithPath: adf))
         }
@@ -442,7 +454,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateTitle() {
-        let rom = emulator.romURL?.lastPathComponent ?? "no Kickstart"
+        let rom = (emulator.romURL?.lastPathComponent ?? "no Kickstart")
+            + (emulator.extendedROMURL.map { " + \($0.lastPathComponent)" } ?? "")
         let disk = emulator.diskURL?.lastPathComponent ?? "empty"
         let hardDisk = emulator.hardDiskURL.map { " — DH0: \($0.lastPathComponent)" } ?? ""
         let hint = view.mouseCaptured ? " — ⌘ releases the mouse" : ""
@@ -484,8 +497,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateTitle()
     }
 
-    private func open(rom url: URL) {
-        do { try emulator.load(rom: url) } catch { alert("Could not load \(url.lastPathComponent): \(error)") }
+    private func open(rom url: URL, extended: URL?) {
+        do { try emulator.load(rom: url, extended: extended) } catch {
+            alert("Could not load \((extended ?? url).lastPathComponent): \(error)")
+        }
         view.updateJoystick()
         updateTitle()
     }
@@ -509,7 +524,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
-    @objc func chooseROM() { if let url = choose(["rom", "bin"]) { open(rom: url) } }
+    /// A newly chosen Kickstart starts without an extended ROM.
+    @objc func chooseROM() { if let url = choose(["rom", "bin"]) { open(rom: url, extended: nil) } }
+    @objc func chooseExtendedROM() {
+        guard let rom = emulator.romURL else { chooseROM(); return }
+        if let url = choose(["rom", "bin"]) { open(rom: rom, extended: url) }
+    }
     @objc func chooseADF() { if let url = choose(["adf"]) { insert(adf: url) } }
     @objc func ejectDisk() { emulator.eject(); updateTitle() }
     @objc func chooseHardDisk() { if let url = choose(["hdf"]) { attach(hardDisk: url) } }
@@ -567,6 +587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let machineItem = NSMenuItem()
         let machine = NSMenu(title: "Machine")
         machine.addItem(withTitle: "Open Kickstart ROM…", action: #selector(chooseROM), keyEquivalent: "k")
+        machine.addItem(withTitle: "Open Extended ROM ($E00000)…", action: #selector(chooseExtendedROM), keyEquivalent: "")
         machine.addItem(withTitle: "Insert Disk (DF0)…", action: #selector(chooseADF), keyEquivalent: "o")
         machine.addItem(withTitle: "Eject Disk", action: #selector(ejectDisk), keyEquivalent: "e")
         machine.addItem(.separator())
