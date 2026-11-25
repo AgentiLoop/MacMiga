@@ -214,6 +214,10 @@ core does not have).
   `interrupt(level:memory:)` presents an autovectored interrupt; each takes the
   bus as `inout`. The machine resets its own devices and decides when to
   interrupt.
+- `step` returns the CPU clocks the instruction took (see "Instruction
+  timing"), and 0 while the CPU is stopped. An accepted interrupt takes
+  `MC68000.interruptClocks`, 44. The machine advances its own hardware by
+  those amounts.
 - After RESET the CPU executes the opcode it had already fetched, as a 68000's
   prefetch does, even if the reset changed what is at that address. Software
   that restarts a machine from RAM depends on this (`RESET` followed by a
@@ -233,70 +237,148 @@ core does not have).
 ### Single-step tests
 
 The package has a second program, `M68KSingleStep`, which runs the core against
-the 68000 set of the SingleStepTests project
-(`github.com/SingleStepTests/680x0`, folder `68000/v1`): 124 files of about
-8,065 single instructions each, 1,000,060 in all, with the registers and
-memory before and after. The files (about 190 MB) are not in this repository.
+the two sets of the SingleStepTests project. A test is one instruction with the
+registers and memory before and after, and the number of clocks it takes.
+
+| Set | Files | Tests | Made with |
+| --- | --- | --- | --- |
+| `github.com/SingleStepTests/680x0`, folder `68000/v1` | 124 `.json.gz` (about 190 MB) | 1,000,060 | a reference emulator |
+| `github.com/SingleStepTests/m68000`, folder `v1` | 127 `.json.bin` (about 130 MB) | 317,500 | "the microcoded core in MAME", in its README's words |
+
+Neither is in this repository, and neither was measured on a 68000.
 
 ```sh
 swift run -c release --package-path Packages/M68K M68KSingleStep 68000/v1
+swift run -c release --package-path Packages/M68K M68KSingleStep m68000/v1
 swift run -c release --package-path Packages/M68K M68KSingleStep --show 5 68000/v1/ASR.b.json.gz
 ```
 
 A test passes when all registers, SR, PC and every listed byte of memory match
-and nothing else was written. Bus cycles and the prefetch queue are not
-compared; the core models neither. `--show N` lists the first N failures of
-each file, `--address-errors` lists those among the address-error tests, and
-`--only TEXT` runs the tests whose name contains TEXT.
+and nothing else was written. The bus cycles and the prefetch queue are not
+compared; the core models neither. The clocks are compared and counted apart;
+they do not make a test fail. `--show N` lists the first N failures of each
+file, `--address-errors` lists those among the address-error tests, `--clocks`
+lists the tests whose time differs, and `--only TEXT` runs the tests whose name
+contains TEXT. The second set records as PC the address of the next prefetch;
+the program subtracts 4 to get the address of the next instruction.
 
-The set was generated with a reference emulator, not measured on a 68000 (its
-README says so), so where it disagrees with Motorola's manuals it is not the
-last word. Result on November 25, 2026:
+Result on November 25, 2026:
 
-| Tests | Count | Result |
+| | 680x0 set | m68000 set |
 | --- | --- | --- |
-| Without an address error | 821,973 | 818,234 pass, 3,739 fail |
-| With an address error | 178,087 | 54,524 match exactly; 63,120 match except inside the exception frame; 60,443 differ elsewhere too |
+| Tests without an address error | 821,973 | 261,894 |
+| of those, passing | 813,220 | 260,338 |
+| of those, failing | 8,753 | 1,556 |
+| of those, with a different time | 2,601 | 0 |
+| Tests with an address error | 178,087 | 55,606 |
+| of those, matching exactly | 54,524 | 24,061 |
+| of those, matching except inside the exception frame | 63,120 | 16,251 |
+| of those, differing elsewhere too | 60,443 | 15,294 |
 
-The 3,739 failures are these:
+The two sets disagree with each other, so no core can pass both. Where they
+disagree MacMiga follows Motorola's manuals, and where the manuals call a
+result undefined or give no figure, the m68000 set, because its generator
+works at the level of the 68000's microcode.
+
+The 8,753 failures against the 680x0 set:
 
 - 3,736 are ASR by a register count larger than the operand's width, on a
-  negative operand. The set expects C and X clear; MacMiga sets them, because
-  every bit shifted out is a copy of the sign bit and the Programmer's
-  Reference Manual defines C and X as the last bit shifted out. Kept as is.
+  negative operand. That set expects C and X clear; MacMiga sets them, because
+  every bit shifted out is a copy of the sign bit (Programmer's Reference
+  Manual, ASR: "The carry bit receives the last bit shifted out of the
+  operand"). The m68000 set expects the same as MacMiga.
+- 4,693 are DIVU and DIVS with an overflow. N and Z are documented as
+  undefined; that set leaves them as they were, the m68000 set has N set and Z
+  clear, and so does MacMiga.
+- 321 are CHK without a trap and with N set beforehand. N is documented as
+  undefined; that set leaves it, the m68000 set clears it, and so does MacMiga.
 - 2 are ASL.B tests whose expected result changes all 32 bits of the register,
   which a byte shift cannot do.
-- 1 is the set's only division by zero, a DIVU. Its expected stacked PC is the
+- 1 is that set's only division by zero, a DIVU. Its expected stacked PC is the
   instruction's own address; MacMiga stacks the next instruction's, as it does
-  for CHK, where the set agrees. The flags of that test do match.
+  for CHK, where the set agrees. The m68000 set has no division by zero.
+
+The 2,601 different times against the 680x0 set: 731 are ADDQ.L and SUBQ.L to
+an address register (6 clocks there; 8 in the User's Manual's table 8-5, the
+m68000 set and MacMiga), 1,265 are DIVS whose overflow shows only after the
+division (16 or 18 there, plus the operand), and 605 are CHK traps (40 there,
+38 in the m68000 set, when the register is negative and bound − register
+overflows 16 bits).
+
+The 1,556 failures against the m68000 set:
+
+- 1,230 are STOP in supervisor mode and differ only in PC: the set's value is
+  4 lower than its convention gives for every other instruction, which I take
+  to mean that a stopped 68000 has not fetched ahead. MacMiga's PC is the
+  address after STOP's two words.
+- 326 are LINK A7. That set pushes A7 as it was before the instruction;
+  MacMiga and the 680x0 set push A7 − 4, the value after the decrement, which
+  is the order the Programmer's Reference Manual gives ("SP – 4 → SP; An →
+  (SP)"). Not resolved.
 
 The address-error tests that differ outside the frame do so in what the faulting
-instruction had already changed, for example An after `-(An)` in the MOVE and
-ADDX files and SR in the CMP files. Inside the frame, in the seven files I
-looked at, the stacked PC is 0 to 8 bytes past the instruction where the
-User's Manual says 2 to 10. Neither was changed: without a measurement on a
-68000 there is nothing to decide them by.
+instruction had already changed, for example An after `-(An)` and SR. Inside
+the frame, in the seven files of the 680x0 set I looked at, the difference is
+the stacked PC. The time of an address error is a flat 50 clocks in MacMiga; in
+the m68000 set's TST.W, CLR.L, ADD.L and MOVEM.W files it is 58 to 72, longer by
+the time the instruction had already run, so most of those times differ
+(133,714 and 48,739 tests). The address-error handling was not changed in this
+round.
 
-Running the set found five faults, now fixed and covered by unit tests:
+Running the sets found these faults, now fixed and covered by unit tests:
 
 - ABCD could stop the emulator with a Swift arithmetic trap for some operands
   that are not valid BCD (the ABCD file ended with signal 5 before the fix),
-  and SBCD and NBCD gave different results from the set for such operands
+  and SBCD and NBCD gave different results from the sets for such operands
   (7,052 tests).
-- CHK changed N when it did not trap, and took its exception with An as it was
-  before `(An)+` or `-(An)` (1,509 tests).
+- CHK took its exception with An as it was before `(An)+` or `-(An)`.
 - A division by zero left N, Z, V and C as they were in the stacked SR; they are
-  now clear, as the set's one such test expects. It also keeps An as `(An)+` or
-  `-(An)` left it, which is by analogy with CHK: the set has no test of that.
+  now clear, as the 680x0 set's one such test expects. It also keeps An as `(An)+` or
+  `-(An)` left it, which is by analogy with CHK: neither set has a test of that.
 - A jump to an odd address took its address error one step late, and JSR had
   pushed the return address by then.
 - The address-error frame held only 24 bits of the access address and none of
   the opcode bits in its first word.
+- A division that overflowed left N and Z as they were.
 
-Before these fixes 801,608 tests passed and 12,300 failed, with the 8,065 ABCD
-tests not run because of the trap.
+### Instruction timing
 
-The package carries its own tests, 79 of them, and they use no Amiga code. The
+`step` returns the time of each instruction in CPU clocks. The figures are
+those of tables 8-1 to 8-14 of the MC68000 User's Manual: 4 clocks for each bus
+cycle of an operand or extension word, and the instruction's own time on top.
+In four places both test sets have a different figure from the printed table,
+and MacMiga uses theirs:
+
+| Instruction | Table | Both sets and MacMiga |
+| --- | --- | --- |
+| ADDQ.W to an address register | 4 | 8 |
+| ANDI.L to a data register | 14 | 16 |
+| TAS on memory | 14 + operand | 10 + operand |
+| BTST with an immediate operand | 8 | 10 |
+
+Where the time depends on the data it is computed from the data:
+
+- shifts and rotates take 2 clocks per bit;
+- BCHG, BSET and BCLR on a data register take 2 clocks less for a bit below 16;
+- MULU takes 38 clocks and 2 for each 1 in the source, MULS 38 and 2 for each
+  change between neighbouring bits of the source with a 0 appended below it;
+- DIVU takes 10 clocks on overflow and 76 to 136 otherwise, DIVS 16 or 18 on an
+  overflow seen at once and 120 to 156 otherwise (the table gives only the
+  maxima, 140 and 158). The rule is Jorge Cwik's description of the 68000's
+  division as I remember it, not taken from a source in front of me; it gives
+  the m68000 set's time in all 3,064 of its DIVU and DIVS tests without an
+  address error;
+- MOVEM takes 4 clocks per word moved;
+- a trap takes 34 clocks, a division by zero 38 and CHK 38 or 40 plus the
+  operand, an interrupt 44 and an address error 50.
+
+All 261,894 tests of the m68000 set without an address error have the time
+MacMiga returns, and 819,372 of the 821,973 of the 680x0 set (the other 2,601
+are listed above). What is not modelled: where inside an instruction each bus
+cycle falls, the time of an address error beyond the flat 50 clocks, and wait
+states, which belong to the machine.
+
+The package carries its own tests, 87 of them, and they use no Amiga code. The
 instruction-level tests were moved here from the MacMiga test target. Their
 checks are unchanged except in two places: the error for an address with
 nothing behind it is now the test bus's own, and the reset test puts its
@@ -307,7 +389,8 @@ made for them: 2 MiB of RAM at `$000000`, 256 KiB of read-only ROM at
 run on a 64 KiB RAM bus (reset, a program with a loop and a subroutine, STOP
 ended by an interrupt, the address-error frame, illegal and TRAP vectors, and
 the RESET instruction: the device reset, the kept prefetch, privilege, and an
-interrupt discarding the prefetch).
+interrupt discarding the prefetch). Seven tests check the time of about 125
+instructions.
 What the MacMiga target still tests of the CPU is its use in the machine:
 interrupts, STOP, and power-on and reset through the ROM overlay.
 
@@ -323,9 +406,9 @@ memory), MULU/MULS/DIVU/DIVS, SWAP, EXT, EXG, MOVEM, MOVE to/from SR and CCR,
 MOVE USP, LINK/UNLK, Scc, DBcc, Bcc/BRA/BSR, RTS, RTR, RTE, TRAP, TRAPV, RESET
 (resets the devices on the bus), STOP, NOP, ABCD/SBCD/NBCD (for operands that are not valid BCD, and for the
 undocumented N and V, the results are those of the single-step test set; see
-"Single-step tests"), CHK.W (trap 6 with N set for a negative register and
-clear for one above the bound; Z/V/C cleared, N unchanged when it does not
-trap) and MOVEP.W/.L. This completes the 68000 instruction set;
+"Single-step tests"), CHK.W (trap 6 if the register is negative or above the
+bound; N set for a negative register and clear otherwise, Z/V/C cleared) and
+MOVEP.W/.L. This completes the 68000 instruction set;
 unassigned encodings and invalid addressing modes take the illegal-instruction
 exception (vector 4, stacked PC = the opcode's address), as on hardware. Setting
 `cpu.stopsOnIllegalInstruction = true` makes `step` throw
@@ -339,8 +422,9 @@ An) use all 32 bits and leave flags unchanged. ADDX/SUBX/NEGX only clear Z.
 Compares set N, Z, V, and C and leave X unchanged; CMPA compares all 32 bits
 with a sign-extended word source. DBcc decrements only
 the low word of Dn and leaves flags unchanged.
-DIVU/DIVS overflow sets V, clears C and leaves N and Z unchanged (an assumption;
-the 68000 leaves them undefined). A division by zero stacks SR with N, Z, V and
+DIVU/DIVS overflow leaves the register unchanged, sets V and N and clears C and
+Z (N and Z are documented as undefined; these are the m68000 test set's
+values). A division by zero stacks SR with N, Z, V and
 C clear. CHK and the divisions take their exception after `(An)+` or `-(An)`
 has changed An.
 Branches support byte and word displacements. Unsupported opcodes throw an
@@ -355,8 +439,9 @@ Autovectored interrupts (`interrupt(level:memory:)`) are accepted at level 7 or
 above the SR mask: SR and PC are stacked, the mask is raised and STOP ends.
 Level 7 is treated as level-sensitive (real hardware: edge-triggered).
 
-This is functional stepping, not cycle-accurate emulation. Prefetch and trace
-are absent. A word or long access to an odd address takes the address-error
+Each instruction is executed in one step and its time is returned (see
+"Instruction timing"); the bus cycles inside it are not placed in time. Prefetch
+and trace are absent. A word or long access to an odd address takes the address-error
 exception: vector 3 with the 14-byte group 0 frame (access type and function
 code, with the opcode's upper 11 bits above them; all 32 bits of the access
 address; opcode; SR; PC). A jump, branch or return to an odd address takes it
@@ -374,8 +459,15 @@ source, so real reads there return bus noise).
 
 `Sources/MacMigaCore/AmigaMachine.swift` wires CPU and bus as a PAL A500. Before
 each instruction Paula's interrupt level is presented to the CPU. Each instruction
-is charged a fixed 10 CPU clocks (4 per idle step while stopped) — an estimate,
-not 68000 timing. That time advances the beam (1 colour clock = 2 CPU clocks;
+takes the CPU clocks the 68000 core returns for it (see "Instruction timing"),
+an accepted interrupt 44 more, and an idle step while stopped 4. The chipset
+is advanced once per instruction, not per bus cycle, and takes no bus time
+from the CPU: the blitter and disk DMA finish at once and bitplane DMA slows
+nothing down. Until November 25, 2026 every instruction was counted as 10
+clocks. In three probe runs of 60,000,000 instructions the average is now 11.1
+(Kickstart 1.3 loading and running a game), 12.9 and 13.3 clocks (Kickstart 1.3
+and 3.1 at their insert-disk screens), so the same program takes more frames
+than before. That time advances the beam (1 colour clock = 2 CPU clocks;
 VERTB each frame) and both CIA timers (1 E clock = 10 CPU clocks). CIA-A TOD
 counts frames, CIA-B TOD counts lines. CIA-A /IRQ sets INTREQ PORTS (level 2),
 CIA-B /IRQ sets INTREQ EXTER (level 6).
@@ -650,7 +742,7 @@ swift run -c release MacMiga "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom" 
 `Developer` (compilers and headers, three quarters of the CD, with file names
 too long for an Amiga volume) is left out; the image is then about 128 MB.
 `--skip-long-names` leaves out ten font files whose names have 31 or 32
-characters. With 8 MB Fast RAM on, the desktop is there after about 130
+characters. With 8 MB Fast RAM on, the desktop is there after about 145
 emulated seconds; Machine ▸ Warp Speed shortens the wait.
 
 Checked on November 25, 2026 with the probe, Kickstart 3.1, 8 MiB fast RAM, and
@@ -658,7 +750,7 @@ the boot floppy and Live CD of the 2026-11-24 nightly build:
 
 | Step | Result |
 | --- | --- |
-| boot | by frame 4,500 AROS had its own screen; by frame 6,500 (130 s) the desktop was up: a title bar starting "Workbench", three volume icons, among them "RAM Disk" and "AROS Live CD", and the pointer in the top left corner. 5,597 blocks read from the hard disk, none written |
+| boot | by frame 4,750 AROS had its own screen; by frame 7,250 (145 s) the desktop was up: a title bar starting "Workbench", three volume icons, among them "RAM Disk" and "AROS Live CD", and the pointer in the top left corner. 5,597 blocks read from the hard disk, none written |
 | mouse moved by 60 and 30 counts | the pointer moved 60 pixels right and 30 lines down |
 | pointer moved onto the "AROS Live CD" icon, two clicks | the pointer changed shape while the disk was read, and a window opened with three rows of drawer icons (1,302 more blocks read) |
 | right button held on the title bar, pointer pulled down | the menu bar appeared and its first menu, "Workbench", dropped down with its items |
@@ -714,10 +806,10 @@ Checked on November 25, 2026 with the probe and the two ROM files of the
 | --- | --- |
 | no disks, 8 MiB fast RAM | AROS's ROM started and showed its boot picture; its exec lists both ROM areas, and its boot log on the serial port says "1MiB ROM detected" |
 | floppy, 8 MiB fast RAM | the AROS shell and its request for the Live CD, as with Kickstart |
-| floppy and CD image, 4 MiB fast RAM | the desktop by frame 5,000 (100 s), sooner than with Kickstart; 5,552 blocks read, none written. The pointer followed the mouse, two clicks opened the "AROS Live CD" window, and the right button brought down the menu |
+| floppy and CD image, 4 MiB fast RAM | the desktop by frame 3,500 (70 s), sooner than with Kickstart; 5,552 blocks read, none written. The pointer followed the mouse, two clicks opened the "AROS Live CD" window, and the right button brought down the menu |
 | floppy and CD image, 2 MiB fast RAM, or 1 MiB chip RAM and no fast RAM | the desktop, the same way |
 | floppy and CD image, stock memory | a requester: could not open "posixc.library" |
-| floppy and CD image, 8 MiB fast RAM | the CD's whole startup ran: 38,267 blocks read and 189 written (font lists), then the desktop with four icons, by frame 25,000 (500 s) |
+| floppy and CD image, 8 MiB fast RAM | the CD's whole startup ran: 37,749 blocks read and 229 written (font lists), then the desktop with four icons, by frame 30,000 (600 s) |
 | the same with the image file read-only | the requester "Volume AROS Live CD is write protected" |
 | CD image alone, without the floppy, 8 MiB fast RAM | did not work. AROS booted from the image and ran the CD's startup with no screen open, then wrote through a null pointer (address 6, which destroys the pointer to exec at address 4) and crashed. The write stores the mouse position into a sprite structure that is not there, and it no longer happens when the CD's pointer preference file (it names PNG pointer images) is left out of the image. Without that file the desktop appeared, together with AROS's own alert "Program failed … Wanderer … Illegal instruction". Whether a real 68000 Amiga does the same was not determined |
 
@@ -794,10 +886,10 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-The tests are in two places. `swift test` runs the 95 tests of the Amiga
+The tests are in two places. `swift test` runs the 96 tests of the Amiga
 machine in `Tests/MacMigaCoreTests`. `swift test --package-path Packages/M68K`
-runs the 79 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
-branch, logic/shift and decimal/MOVEP/CHK tests described below). Coverage includes
+runs the 87 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
+branch, logic/shift, decimal/MOVEP/CHK and timing tests described below). Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -822,7 +914,8 @@ exception vectors. Memory tests cover chip-RAM mirrors, slow RAM, the custom
 chip mirror, the empty autoconfig window, and the extended ROM (mapped, read-only,
 kept over a reset, absent by default, wrong sizes refused). Machine tests cover power-on and
 reset through the ROM overlay, interrupt
-masking and stacking, STOP woken by VERTB with RTE, STOP privilege, CIA timer
+masking and stacking, the clock advancing by each instruction's time and by an
+interrupt's, STOP woken by VERTB with RTE, STOP privilege, CIA timer
 interrupts routed to INTREQ levels 2 and 6, and TOD driven by the beam. Video
 tests cover Copper MOVE/WAIT/SKIP, the danger bit, frame restart, lowres and
 hires placement, modulos and HAM. Blitter tests cover shifted/masked copies,
@@ -910,8 +1003,8 @@ November 25, 2026 were each 524,288 bytes. Their measured startup results:
 
 | File | Reset PC | Result with `--limit 30000000` |
 | --- | --- | --- |
-| kickstart-1.3.rom | $00FC00D2 | no error; 42.2 emulated s; insert-disk screen drawn |
-| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | no error; 40.1 emulated s; insert-disk screen drawn |
+| kickstart-1.3.rom | $00FC00D2 | no error; 54.1 emulated s; insert-disk screen drawn |
+| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | no error; 55.7 emulated s; insert-disk screen drawn |
 
 `--frames DIR` writes the last frame as `DIR/<rom name>.png`. Kickstart 1.3
 shows the white screen with the hand holding a "Workbench 1.3" disk (palette
