@@ -14,7 +14,8 @@ Workbench disks or games has not been tested.
 `S/Startup-Sequence`; see "Expansion boards and hard disk" below. A hardfile
 can be made from a Mac folder or an LHA archive (see "Making a hard disk"); a
 game made that way from an LHA archive started from the hard disk under
-Kickstart 3.1. WHDLoad has not been run yet.
+Kickstart 3.1. WHDLoad 20.1 runs from such a disk with Kickstart 3.1 and fast
+RAM; one install (Pac-Man) has been tried. See "WHDLoad".
 
 ## Run the app
 
@@ -255,22 +256,25 @@ lines, the second redirected to `SYS:proof`:
 
 With `--fast 8` both ROMs list a memory header at `$200000`–`$A00000` in
 exec's memory list. In the app, the same FFS hardfile booted under Kickstart
-3.1 and the file on disk received the same changed blocks. Nothing larger than
-these test volumes has been tried: no Workbench installation, no WHDLoad.
+3.1 and the file on disk received the same changed blocks. No Workbench
+installation has been tried.
 
 ## Making a hard disk
 
 ```sh
-swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMANDS"] <folder | archive.lha> <output.hdf>
+swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... <folder | archive.lha>... <output.hdf>
 swift run -c release MakeHardfile --list <folder | archive.lha>
 ```
 
-`MakeHardfile` writes a hardfile holding the contents of a Mac folder or of an
-LHA archive, ready to attach as DH0. `--startup` puts the given text in
-`S/Startup-Sequence` (replacing one from the source), so
+`MakeHardfile` writes a hardfile holding the contents of Mac folders and LHA
+archives, ready to attach as DH0. Several sources are merged into one volume
+(directories with the same name are combined; a file found in more than one
+source is taken from the last). `--startup` puts the given text in
+`S/Startup-Sequence` (replacing one from the sources), and each further
+`--startup` adds a line, so
 `--startup "pacman_HD/pacman"` makes a disk that starts that program when it
 boots. Without a startup-sequence Kickstart 3.1 boots to a `1>` shell prompt.
-The volume is named after the folder or archive unless `--name` is given, and
+The volume is named after the first folder or archive unless `--name` is given, and
 has 2 MiB of free space, or a quarter of its contents if that is more, unless
 `--free` is given.
 
@@ -301,7 +305,44 @@ Checked on November 25, 2026 with Kickstart 3.1 and the probe:
 | the same 60 MB volume, unmodified | mounted with 37 blocks read (the 31 bitmap blocks among them) and none written |
 
 The app's New Hard Disk menu item was built but its file panels were not
-operated; it calls the same code as the tool.
+operated; it calls the same code as the tool (with one source).
+
+## WHDLoad
+
+WHDLoad runs installed games from a hard disk. It is not part of MacMiga: get
+the WHDLoad package from whdload.de and the install for a game you own, and
+put both on one hardfile. WHDLoad needs Kickstart 2.0 or newer and more memory
+than the stock machine has, so use Kickstart 3.1 and turn on Machine ▸ 8 MB
+Fast RAM (`--fast` in the probe).
+
+```sh
+swift run -c release MakeHardfile --name WHD \
+    --startup "CD pacman_HD" --startup "SYS:WHDLoad/C/WHDLoad pacman.slave PRELOAD" \
+    pacman_HD.lha WHDLoad_usr_small.lha whd.hdf
+swift run -c release MacMiga "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom" whd.hdf
+```
+
+The first two lines of the startup-sequence change to the install's directory
+and start WHDLoad with its slave; the path matches where the WHDLoad archive
+unpacks (`WHDLoad/C/WHDLoad`). Nothing in MacMiga is specific to WHDLoad.
+
+Checked on November 25, 2026 with the probe, Kickstart 3.1, WHDLoad 20.1
+(build 7190) and a Pac-Man install whose slave asks for 512 KiB of chip memory
+and 512 KiB of expansion memory:
+
+| Run | Result |
+| --- | --- |
+| 8 MiB fast RAM, `PRELOAD` | WHDLoad started the slave; the game drew its maze and was executing from fast RAM (the same display registers and palette as the game run on its own); 672 blocks read |
+| the same, with two presses of the fire button | the frame changed from the attract screen (its centre text gone, ghosts in their pen), so the game takes joystick input under WHDLoad |
+| the same, with F10 (this slave's quit key) pressed while the game ran | WHDLoad gave the machine back to AmigaDOS: the shell window was on screen again, now with the `1>` prompt that follows the end of the startup-sequence, and the CPU idled in exec; nothing was written to the disk |
+| without `PRELOAD` | the game started, and after two fire presses F10 returned to the `1>` prompt in the same way |
+| 1, 2 or 4 MiB fast RAM | the game started |
+| no fast RAM (512 KiB chip + 512 KiB slow) | WHDLoad's own requester: "Can't allocate ExpMem." with Retry and Cancel |
+
+Not tried: any other install, installs that need a Kickstart image file, more
+than 512 KiB of chip memory or a 68020, saving to disk from a game, starting
+from a Workbench icon, and WHDLoad in the app window (the app runs the same
+core as the probe).
 
 ## Audio (Paula)
 
@@ -371,7 +412,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-One hundred and forty-six tests cover the memory foundation and CPU subset. Coverage includes
+One hundred and forty-seven tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -417,8 +458,8 @@ attributes and comments, and damaged archives), DateStamp conversion, the name
 hash, and volumes read back by a separate reader in the test: files of every
 size class up to several extension blocks, hash chains, nested and empty
 directories, metadata, a bitmap that marks exactly the unused blocks, bitmap
-extension blocks, name and conflict errors, and a Mac folder turned into
-entries and into a hardfile.
+extension blocks, name and conflict errors, a Mac folder turned into
+entries and into a hardfile, and a folder and an archive merged into one volume.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -427,12 +468,14 @@ These tests establish the implemented contract, not Amiga software compatibility
 ROMs remain user-supplied and ignored by Git. From the repository root:
 
 ```sh
-swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--key FRAME:HEXCODE]... [--fire FRAME]... "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
 ```
 
 `--hdf` attaches a hardfile as DH0 (the file itself is never modified;
 `--hdf-out` writes the image as the Amiga left it), `--fast` adds fast RAM. The
 probe then also prints the expansion boards and the blocks read and written.
+`--key 4000:59` presses the key with Amiga raw code `$59` (F10) at frame 4000
+for 5 frames; `--fire 2600` holds the port-2 fire button for 10 frames.
 
 The probe stops at the first diagnostic or after `--limit` instructions
 (default 10,000); reaching
@@ -467,9 +510,8 @@ compatibility.
 
 ## Next milestones
 
-1. Hard disk: run WHDLoad itself from a hardfile (it requires Kickstart 2.0 or
-   newer and its own program files) and fix what breaks; Rigid Disk Block
-   images.
+1. WHDLoad: try more installs and fix what breaks; 1 MiB of chip memory (ECS
+   Agnus) for installs that ask for it; Rigid Disk Block images.
 2. CPU package: move the instruction-level tests onto a plain RAM bus inside
    `Packages/M68K`; later a 68030/68040 with MMU and FPU for NeXT.
 3. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
