@@ -209,6 +209,14 @@ struct KickstartProbe {
                     return "\(partition.name) (DosType \(type), blocks \(partition.firstBlock)-\(partition.firstBlock + partition.blockCount - 1), boot priority \(partition.bootPriority))"
                 }
                 print("Hard disk \(hardDisk.isPartitioned ? "with partition table" : "hardfile")\(hardDisk.isWriteProtected ? ", write-protected" : ""): " + partitions.joined(separator: ", "))
+                if !hardDisk.fileSystems.isEmpty {
+                    let systems = hardDisk.fileSystems.map { system in
+                        String(format: "DosType $%08X version %d.%d", system.dosType, system.version >> 16, system.version & 0xFFFF)
+                            + (system.name.isEmpty ? "" : " \"\(system.name)\"")
+                            + (system.program.map { " (\($0.hunks.count) hunk\($0.hunks.count == 1 ? "" : "s"), \($0.loadSize) bytes)" } ?? " (program not readable)")
+                    }
+                    print("File systems in the partition table: " + systems.joined(separator: ", "))
+                }
                 print("Hard disk: \(hardDisk.blocksRead) blocks read, \(hardDisk.blocksWritten) written")
                 if let hardDiskOutput {
                     try Data(hardDisk.bytes).write(to: URL(fileURLWithPath: hardDiskOutput))
@@ -223,8 +231,9 @@ struct KickstartProbe {
         }
     }
 
-    /// What the running Kickstart has found, read from exec's and graphics.library's own
-    /// structures: the memory list, and (Kickstart 2.0 and newer) the chip revision bits.
+    /// What the running Kickstart has found, read from exec's, graphics.library's and
+    /// dos.library's own structures: the memory list, (Kickstart 2.0 and newer) the chip
+    /// revision bits, the entries of FileSystem.resource, and DOS's devices and volumes.
     /// Empty when ExecBase is not set up.
     static func systemReport(_ memory: inout AmigaMemory) -> [String] {
         guard let sysBase = try? memory.readLong(at: 4), sysBase & 1 == 0, sysBase != 0,
@@ -259,6 +268,39 @@ struct KickstartProbe {
             guard version >= 36, let bits = try? memory.readByte(at: library + 236) else { continue }
             lines.append(String(format: "graphics.library %d ChipRevBits0=$%02X (ECS Agnus %@, ECS Denise %@, AGA %@)", version, bits,
                                 bits & 1 != 0 ? "yes" : "no", bits & 2 != 0 ? "yes" : "no", bits & 0x0C != 0 ? "yes" : "no"))
+        }
+        for resource in nodes(sysBase + 336) where name(of: resource) == "FileSystem.resource" {
+            let entries = nodes(resource + 18).map { entry in
+                String(format: "$%08X %d.%d", (try? memory.readLong(at: entry + 14)) ?? 0,
+                       ((try? memory.readLong(at: entry + 18)) ?? 0) >> 16, ((try? memory.readLong(at: entry + 18)) ?? 0) & 0xFFFF)
+            }
+            lines.append("FileSystem.resource (DosType and version): " + entries.joined(separator: ", "))
+        }
+        // dos.library: dl_Root -> rn_Info -> di_DevInfo, a chain of BPTRs.
+        for library in nodes(sysBase + 378) where name(of: library) == "dos.library" {
+            func pointer(_ address: UInt32) -> UInt32 { ((try? memory.readLong(at: address)) ?? 0) << 2 }
+            let root = (try? memory.readLong(at: library + 34)) ?? 0
+            guard root != 0, root & 1 == 0 else { continue }
+            var entry = pointer(pointer(root + 24) + 4)
+            var devices: [String] = [], volumes: [String] = []
+            var count = 0
+            while entry != 0, count < 64 {
+                count += 1
+                var text = pointer(entry + 40)
+                let length = Int((try? memory.readByte(at: text)) ?? 0)
+                var bytes: [UInt8] = []
+                for _ in 0..<min(length, 30) { text += 1; bytes.append((try? memory.readByte(at: text)) ?? 0x3F) }
+                let label = String(String.UnicodeScalarView(bytes.map { Unicode.Scalar($0) }))
+                let task = (try? memory.readLong(at: entry + 8)) ?? 0
+                switch (try? memory.readLong(at: entry + 4)) ?? 99 {
+                case 0: devices.append(String(format: "%@ (segment list $%06X, %@)", label, pointer(entry + 32), task != 0 ? "handler running" : "handler not started"))
+                case 2: volumes.append("\"\(label)\"")
+                default: break
+                }
+                entry = pointer(entry)
+            }
+            lines.append("DOS devices: " + devices.joined(separator: ", "))
+            lines.append("DOS volumes: " + (volumes.isEmpty ? "none" : volumes.joined(separator: ", ")))
         }
         return lines
     }
