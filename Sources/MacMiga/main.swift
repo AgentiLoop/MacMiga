@@ -96,8 +96,13 @@ final class Emulator {
         }
     }
 
+    /// Warp speed: emulate as fast as the Mac allows instead of 50 frames a second, without
+    /// sound. Not remembered between launches; `-Warp YES` on the command line starts with it on.
+    var warp = UserDefaults.standard.bool(forKey: "Warp")
+
     /// Runs until the chipset completes one more frame (bounded so a bug cannot hang the UI).
-    func runFrame() {
+    /// With `playAudio` false the frame's sound is discarded.
+    func runFrame(playAudio: Bool = true) {
         guard var machine else { return }
         // The local copy is the only owner while it runs; otherwise the first write of the
         // frame would copy chip RAM, slow RAM and the frame buffer.
@@ -109,7 +114,8 @@ final class Emulator {
                 try machine.step()
                 steps += 1
             }
-            audio?.queue.push(machine.memory.audio.drainSamples())
+            let samples = machine.memory.audio.drainSamples()
+            if playAudio { audio?.queue.push(samples) }
             self.machine = machine
             if machine.memory.video.frameCount % 50 == 0 { saveHardDisk() }
         } catch {
@@ -422,7 +428,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { emulator.saveHardDisk() }
 
     private func tick() {
-        emulator.runFrame()
+        if emulator.warp {
+            // As many frames as fit in 15 ms of each 20 ms tick, so the window stays responsive.
+            let deadline = Date().addingTimeInterval(0.015)
+            repeat { emulator.runFrame(playAudio: false) } while emulator.machine != nil && Date() < deadline
+        } else {
+            emulator.runFrame()
+        }
         if let video = emulator.machine?.memory.video { view.show(video) }
     }
 
@@ -431,7 +443,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let disk = emulator.diskURL?.lastPathComponent ?? "empty"
         let hardDisk = emulator.hardDiskURL.map { " — DH0: \($0.lastPathComponent)" } ?? ""
         let hint = view.mouseCaptured ? " — ⌘ releases the mouse" : ""
-        window.title = "MacMiga — \(rom) — DF0: \(disk)\(hardDisk)\(hint)"
+        let warp = emulator.warp ? " — warp" : ""
+        window.title = "MacMiga — \(rom) — DF0: \(disk)\(hardDisk)\(warp)\(hint)"
     }
 
     /// Game controllers report changes on the main queue; connect/disconnect refreshes port 2.
@@ -526,6 +539,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sender.state = emulator.fastRAM ? .on : .off
         view.updateJoystick()
     }
+    @objc func toggleWarp(_ sender: NSMenuItem) {
+        emulator.warp.toggle()
+        sender.state = emulator.warp ? .on : .off
+        updateTitle()
+    }
     @objc func toggleBigChipRAM(_ sender: NSMenuItem) {
         do { try emulator.setBigChipRAM(!emulator.bigChipRAM) } catch { alert("Reset failed: \(error)") }
         sender.state = emulator.bigChipRAM ? .on : .off
@@ -559,6 +577,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         chip.state = emulator.bigChipRAM ? .on : .off
         machine.addItem(.separator())
         machine.addItem(withTitle: "Reset", action: #selector(resetMachine), keyEquivalent: "r")
+        let warp = machine.addItem(withTitle: "Warp Speed", action: #selector(toggleWarp(_:)), keyEquivalent: "t")
+        warp.state = emulator.warp ? .on : .off
         machine.addItem(.separator())
         let cursor = machine.addItem(withTitle: "Arrow Keys Control Joystick (Port 2)",
                                      action: #selector(toggleCursorJoystick(_:)), keyEquivalent: "j")
