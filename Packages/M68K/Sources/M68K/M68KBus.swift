@@ -25,25 +25,26 @@ extension M68KBus {
 }
 
 /// Word and long accesses as the 68000 makes them: an odd address is an address error and
-/// never reaches the bus. The reported address is the 24 bits the 68000 drives.
+/// never reaches the bus. The reported address is all 32 bits of the 68000's address, as the
+/// exception frame holds them; only the low 24 would have reached the pins.
 extension M68KBus {
     @inlinable mutating func readAlignedWord(at address: UInt32) throws -> UInt16 {
-        guard address & 1 == 0 else { throw CPUError.addressError(address: address & 0xFF_FFFF, isWrite: false) }
+        guard address & 1 == 0 else { throw CPUError.addressError(address: address, isWrite: false) }
         return try readWord(at: address)
     }
 
     @inlinable mutating func readAlignedLong(at address: UInt32) throws -> UInt32 {
-        guard address & 1 == 0 else { throw CPUError.addressError(address: address & 0xFF_FFFF, isWrite: false) }
+        guard address & 1 == 0 else { throw CPUError.addressError(address: address, isWrite: false) }
         return try readLong(at: address)
     }
 
     @inlinable mutating func writeAlignedWord(_ value: UInt16, at address: UInt32) throws {
-        guard address & 1 == 0 else { throw CPUError.addressError(address: address & 0xFF_FFFF, isWrite: true) }
+        guard address & 1 == 0 else { throw CPUError.addressError(address: address, isWrite: true) }
         try writeWord(value, at: address)
     }
 
     @inlinable mutating func writeAlignedLong(_ value: UInt32, at address: UInt32) throws {
-        guard address & 1 == 0 else { throw CPUError.addressError(address: address & 0xFF_FFFF, isWrite: true) }
+        guard address & 1 == 0 else { throw CPUError.addressError(address: address, isWrite: true) }
         try writeLong(value, at: address)
     }
 }

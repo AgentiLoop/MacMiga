@@ -122,6 +122,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
         try memory.writeWord(extensionWord, at: 0x102)
         var cpu = MC68000()
         cpu.programCounter = 0x100
+        cpu.stopsOnAddressError = true // odd targets stay in PC instead of being taken as address errors
         try cpu.step(memory: &memory)
         #expect(cpu.programCounter == target)
     }

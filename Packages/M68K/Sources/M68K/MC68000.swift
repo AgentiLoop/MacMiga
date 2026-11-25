@@ -109,8 +109,7 @@ public struct MC68000: Equatable, Sendable {
 
     /// Executes one supported instruction. PC is the next instruction address on success.
     /// On failure CPU registers remain unchanged; earlier bus writes are not rolled back.
-    /// Errors are host diagnostics, not hardware exception processing. Odd branch targets
-    /// are detected by the next instruction fetch, since prefetch is not modeled.
+    /// Errors are host diagnostics, not hardware exception processing.
     /// Group 1/2 exceptions (TRAP, privilege violation, divide by zero, illegal, line A/F)
     /// are processed by pushing PC and SR on the supervisor stack and jumping through the
     /// vector table. Bus/address errors and trace are not modelled yet; see `interrupt(level:memory:)`.
@@ -118,10 +117,18 @@ public struct MC68000: Equatable, Sendable {
         guard !isStopped else { return }
         let prefetched = prefetchedOpcode
         prefetchedOpcode = nil
+        let instructionAddress = programCounter
         do {
             do {
                 try execute(prefetched: prefetched, memory: &memory)
+                // A jump to an odd address faults at once: the 68000 fetches the first word
+                // at the target before the instruction ends, with the jump still in IR.
+                if programCounter & 1 != 0, instructionAddress & 1 == 0, !stopsOnAddressError {
+                    let opcode = try prefetched ?? memory.readAlignedWord(at: instructionAddress)
+                    try enterAddressError(accessAddress: programCounter, write: false, instruction: opcode, memory: &memory)
+                }
             } catch let trap as Trap {
+                if let registers = trap.registers { self = registers }
                 if let condition = trap.condition { status = (status & 0xFF00) | condition }
                 try enterException(vector: trap.vector, returnAddress: trap.returnAddress, memory: &memory)
             } catch CPUError.unsupportedInstruction(_, let address) where !stopsOnIllegalInstruction {
@@ -136,16 +143,19 @@ public struct MC68000: Equatable, Sendable {
     }
 
     /// Group 0 frame (MC68000UM 6.3.9.1), from SSP upwards: special status word (R/W bit 4,
-    /// I/N bit 3 = 0, function code bits 0–2), access address (long), instruction register,
-    /// SR, PC. The stacked PC is the faulting address for an odd opcode fetch, else the
-    /// instruction address + 2 (real hardware stacks a value 2–10 bytes past it). A fault while
-    /// writing this frame (odd SSP) would halt a real 68000; here `CPUError.addressError` is thrown.
+    /// I/N bit 3 = 0, function code bits 0–2; the undocumented upper bits are those of the
+    /// instruction register), access address (all 32 bits), instruction register, SR, PC.
+    /// `instruction` is the opcode of a jump whose target is odd; for a fetch at an odd PC
+    /// that no instruction led to, the instruction register is stacked as 0. The stacked PC is
+    /// the faulting address for an odd opcode fetch, else the instruction address + 2 (real
+    /// hardware stacks a value 2–10 bytes past it). A fault while writing this frame (odd SSP)
+    /// would halt a real 68000; here `CPUError.addressError` is thrown.
     @inlinable mutating func enterAddressError<Bus: M68KBus>(accessAddress: UInt32, write: Bool,
-                                            memory: inout Bus) throws {
-        let fetch = !write && accessAddress == programCounter & 0xFF_FFFF
-        let opcode = fetch ? 0 : try memory.readAlignedWord(at: programCounter)
+                                            instruction: UInt16? = nil, memory: inout Bus) throws {
+        let fetch = !write && accessAddress == programCounter
+        let opcode = try instruction ?? (fetch ? 0 : memory.readAlignedWord(at: programCounter))
         let supervisor: UInt16 = status & 0x2000 != 0 ? 4 : 0
-        let special = (write ? 0 : 0x10) | supervisor | (fetch ? 2 : 1)
+        let special = (opcode & 0xFFE0) | (write ? 0 : 0x10) | supervisor | (fetch ? 2 : 1)
         var next = self
         next.status = (status | 0x2000) & 0x7FFF
         let stackPointer = next.supervisorStackPointer &- 14
@@ -175,17 +185,22 @@ public struct MC68000: Equatable, Sendable {
         return true
     }
 
-    /// Pending exception raised by an instruction; CPU state is untouched when it is thrown,
-    /// except that `condition`, if given, replaces the CCR before stacking (CHK sets N).
+    /// Pending exception raised by an instruction. CPU state is as before the instruction
+    /// when it is thrown, with two exceptions: `condition`, if given, replaces the CCR before
+    /// stacking (CHK sets N, a division by zero clears N, Z, V and C), and `registers`, if
+    /// given, are the registers after the operand was fetched (CHK and the divisions trap
+    /// after `(An)+` or `-(An)` has changed An).
     @usableFromInline struct Trap: Error {
         @usableFromInline let vector: Int
         @usableFromInline let returnAddress: UInt32
         @usableFromInline var condition: UInt16?
+        @usableFromInline var registers: MC68000?
 
-        @inlinable init(vector: Int, returnAddress: UInt32, condition: UInt16? = nil) {
+        @inlinable init(vector: Int, returnAddress: UInt32, condition: UInt16? = nil, registers: MC68000? = nil) {
             self.vector = vector
             self.returnAddress = returnAddress
             self.condition = condition
+            self.registers = registers
         }
     }
 
@@ -280,7 +295,9 @@ public struct MC68000: Equatable, Sendable {
                 next[address: Int((opcode >> 9) & 7)] = target
                 next.programCounter = cursor
             } else {
-                if opcode & 0xFFC0 == 0x4E80 { // JSR: resolve target before changing A7.
+                // JSR resolves the target before changing A7, and fetches from it before it
+                // pushes: nothing is pushed when the target is odd.
+                if opcode & 0xFFC0 == 0x4E80, target & 1 == 0 {
                     let stackPointer = next[address: 7] &- 4
                     try memory.writeAlignedLong(cursor, at: stackPointer)
                     next[address: 7] = stackPointer
@@ -401,35 +418,38 @@ public struct MC68000: Equatable, Sendable {
     /// BCD add/subtract with X for ABCD, SBCD and NBCD. C and X = decimal carry/borrow, Z cleared
     /// if the result is nonzero (else unchanged); N and V follow the 68000's undocumented results.
     @inlinable mutating func decimal(_ destination: UInt32, _ source: UInt32, subtract: Bool) -> UInt32 {
-        let x: UInt32 = status & 0x10 != 0 ? 1 : 0
-        var result: UInt32
-        var overflow: UInt32
-        let carry: Bool
+        let x: Int = status & 0x10 != 0 ? 1 : 0
+        let d = Int(destination & 0xFF), s = Int(source & 0xFF)
+        var result: Int
+        let binary: Int
+        let carry: Bool, overflow: Bool
         if subtract {
-            result = (destination & 0x0F) &- (source & 0x0F) &- x
-            overflow = ~result
-            if result > 9 { result &-= 6 }
-            result = result &+ (destination & 0xF0) &- (source & 0xF0)
-            carry = result > 0x99
-            if carry { result &+= 0xA0 }
-            result &= 0xFF
-            overflow &= ~result
+            // The low digits are subtracted first; a borrow out of them corrects by 6, and a
+            // borrow out of the whole byte by $60. Operands need not be valid BCD.
+            let low = (d & 0x0F) - (s & 0x0F) - x
+            binary = (d & 0xF0) - (s & 0xF0) + low
+            result = binary
+            var correction = 0
+            if low & 0xF0 != 0 { result -= 6; correction = 6 }
+            if (d - s - x) & 0x100 != 0 { result -= 0x60 }
+            carry = (d - s - correction - x) & 0x300 != 0
+            overflow = binary & 0x80 != 0 && result & 0x80 == 0
         } else {
-            result = (destination & 0x0F) + (source & 0x0F) + x
-            overflow = ~result
-            if result > 9 { result += 6 }
-            result += (destination & 0xF0) + (source & 0xF0)
-            carry = result > 0x99
-            if carry { result -= 0xA0 }
-            overflow &= result
-            result &= 0xFF
+            let low = (d & 0x0F) + (s & 0x0F) + x
+            binary = (d & 0xF0) + (s & 0xF0) + low
+            result = binary
+            if low > 9 { result += 6 }
+            carry = result & 0x3F0 > 0x90
+            if carry { result += 0x60 }
+            overflow = binary & 0x80 == 0 && result & 0x80 != 0
         }
+        result &= 0xFF
         status &= ~0x1B // keep Z
         if carry { status |= 0x11 }
         if result & 0x80 != 0 { status |= 0x08 }
-        if overflow & 0x80 != 0 { status |= 0x02 }
+        if overflow { status |= 0x02 }
         if result != 0 { status &= ~0x04 }
-        return result
+        return UInt32(result)
     }
 
     /// ORI/ANDI/SUBI/ADDI/EORI (including to CCR/SR) and BTST/BCHG/BCLR/BSET.
@@ -605,10 +625,12 @@ public struct MC68000: Equatable, Sendable {
             let source = try moveOperand(mode: mode, register: register, size: 2, cursor: &cursor, memory: &memory)
             let bound = Int16(bitPattern: UInt16(try read(source, size: 2, memory: &memory)))
             let value = Int16(bitPattern: UInt16(truncatingIfNeeded: self[data: Int((opcode >> 9) & 7)]))
-            status &= ~0x0F // Z, V, C undefined: cleared as Musashi/UAE do
+            // Z, V and C are documented as undefined and N as undefined without a trap. As in
+            // the SingleStepTests set, Z, V and C are cleared and N is left alone unless CHK traps.
+            status &= ~0x07
             if value < 0 || value > bound {
-                if value < 0 { status |= 0x08 }
-                throw Trap(vector: 6, returnAddress: cursor, condition: status & 0xFF)
+                status = value < 0 ? status | 0x08 : status & ~0x08
+                throw Trap(vector: 6, returnAddress: cursor, condition: status & 0xFF, registers: self)
             }
         case _ where opcode & 0xFB80 == 0x4880: // MOVEM
             try moveMultiple(opcode, cursor: &cursor, memory: &memory)
@@ -744,7 +766,8 @@ public struct MC68000: Equatable, Sendable {
                 self[data: upper] = product
                 setLogicFlags(product, size: 4)
             } else {
-                guard source != 0 else { throw Trap(vector: 5, returnAddress: cursor) }
+                // Division by zero: N, Z, V and C are clear in the stacked SR (SingleStepTests set).
+                guard source != 0 else { throw Trap(vector: 5, returnAddress: cursor, condition: status & 0x10, registers: self) }
                 let quotient: Int64, remainder: Int64
                 if signed {
                     let dividend = Int64(Int32(bitPattern: destination)), divisor = Int64(Int16(bitPattern: source))

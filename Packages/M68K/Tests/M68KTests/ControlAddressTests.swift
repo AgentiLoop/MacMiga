@@ -15,7 +15,7 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
         (0x28, [0xFFF0], 0x2F0),                // -16(A0)
         (0x30, [0x18FE], 0x31E),                // -2(A0,D1.L)
         (0x38, [0x8000], 0xFFFF8000),            // absolute short, sign-extended
-        (0x39, [0x1234, 0x5679], 0x12345679),    // absolute long, no target read
+        (0x39, [0x1234, 0x5678], 0x12345678),    // absolute long, no target read
         (0x3A, [0xFFFE], 0x100),                // -2(PC), extension-word base
         (0x3B, [0x18FE], 0x120)                 // -2(PC,D1.L)
     ]
@@ -178,8 +178,10 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
         cpu[address: 7] = 0x400
         try cpu.step(memory: &memory)
         #expect(cpu.programCounter == target)
-        #expect(cpu[address: 7] == (opcode == 0x4EB9 ? 0x3FC : 0x400))
-        if opcode == 0x4EB9 { #expect(try memory.readLong(at: 0x3FC) == 0x106) }
+        // JSR fetches from its target before it pushes, so an odd target pushes nothing.
+        let pushes = opcode == 0x4EB9 && target & 1 == 0
+        #expect(cpu[address: 7] == (pushes ? 0x3FC : 0x400))
+        if pushes { #expect(try memory.readLong(at: 0x3FC) == 0x106) }
         let before = cpu
         #expect(throws: error) { try cpu.step(memory: &memory) }
         #expect(cpu == before)

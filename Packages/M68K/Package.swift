@@ -9,6 +9,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "M68K"),
+        .executableTarget(name: "M68KSingleStep", dependencies: ["M68K"]),
         .testTarget(name: "M68KTests", dependencies: ["M68K"])
     ]
 )

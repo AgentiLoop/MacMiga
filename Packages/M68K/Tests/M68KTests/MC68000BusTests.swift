@@ -108,7 +108,7 @@ private func start(_ program: [UInt16]) throws -> (MC68000, RAM) {
     try cpu.step(memory: &memory)
     #expect(cpu.programCounter == 0x600)
     #expect(cpu.supervisorStackPointer == 0x8000 - 14)
-    #expect(try memory.readWord(at: 0x7FF2) == 0x15)        // read, supervisor data
+    #expect(try memory.readWord(at: 0x7FF2) == 0x3015)      // read, supervisor data; upper bits from the opcode
     #expect(try memory.readLong(at: 0x7FF4) == 0x1001)      // access address
     #expect(try memory.readWord(at: 0x7FF8) == 0x3010)      // instruction register
     #expect(try memory.readWord(at: 0x7FFA) == 0x2700)      // SR

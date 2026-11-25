@@ -109,7 +109,7 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
     #expect(cpu.programCounter == 0x3000)
     #expect(cpu.supervisorStackPointer == 0x8000 - 14)
     var m = memory
-    #expect(try m.readWord(at: 0x7FF2) == 0x0001)   // write, user data space
+    #expect(try m.readWord(at: 0x7FF2) == 0x3081)   // write, user data space; upper bits from the opcode
     #expect(try m.readLong(at: 0x7FF4) == 0x301)    // access address
     #expect(try m.readWord(at: 0x7FF8) == 0x3080)   // instruction register
     #expect(try m.readWord(at: 0x7FFA) == 0x0000)   // SR
@@ -117,13 +117,96 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
 }
 
 @Test func oddOpcodeFetchTakesAddressError() throws {
-    // BRA.S *+1 lands on an odd PC; the next fetch is a supervisor program-space read fault.
-    let (cpu, memory) = try run([0x60FF], steps: 2) { _, memory in
+    // BRA.S *+1 fetches from an odd address before it ends: a supervisor program-space read
+    // fault with the branch still in the instruction register.
+    let (cpu, memory) = try run([0x60FF]) { _, memory in
         try memory.writeLong(0x3000, at: 3 * 4)
     }
     #expect(cpu.programCounter == 0x3000)
+    #expect(cpu.supervisorStackPointer == 0x8000 - 14)
     var m = memory
-    #expect(try m.readWord(at: 0x7FF2) == 0x0016)   // read, supervisor program space
+    #expect(try m.readWord(at: 0x7FF2) == 0x60F6)   // read, supervisor program space
     #expect(try m.readLong(at: 0x7FF4) == 0x101)
+    #expect(try m.readWord(at: 0x7FF8) == 0x60FF)   // instruction register
     #expect(try m.readLong(at: 0x7FFC) == 0x101)
+}
+
+@Test func jsrToAnOddAddressFaultsBeforeItPushes() throws {
+    // JSR $00000301: the 68000 fetches from the target first, so no return address is pushed.
+    let (cpu, memory) = try run([0x4EB9, 0x0000, 0x0301]) { _, memory in
+        try memory.writeLong(0x3000, at: 3 * 4)
+    }
+    #expect(cpu.programCounter == 0x3000)
+    #expect(cpu.supervisorStackPointer == 0x8000 - 14)
+    var m = memory
+    #expect(try m.readWord(at: 0x7FF2) == 0x4EB6)
+    #expect(try m.readLong(at: 0x7FF4) == 0x301)
+    #expect(try m.readWord(at: 0x7FF8) == 0x4EB9)
+}
+
+@Test func addressErrorFrameHoldsAll32BitsOfTheAddress() throws {
+    // MOVE.W (A0),D0 with A0 = $12001001: only 24 bits would reach the pins, the frame has all 32.
+    let (_, memory) = try run([0x3010]) { cpu, memory in
+        cpu[address: 0] = 0x1200_1001
+        try memory.writeLong(0x3000, at: 3 * 4)
+    }
+    var m = memory
+    #expect(try m.readLong(at: 0x7FF4) == 0x1200_1001)
+}
+
+@Test func decimalArithmeticOnOperandsThatAreNotBCD() throws {
+    // Expected values from the SingleStepTests 68000 set (github.com/SingleStepTests/680x0).
+    // (opcode, destination register, destination, source register, source, SR, result, SR after)
+    let cases: [(UInt16, Int, UInt32, Int, UInt32, UInt16, UInt32, UInt16)] = [
+        (0xC102, 0, 0x2693_027E, 2, 0xBD0F_976B, 0x2701, 0x2693_024F, 0x2711), // ABCD D2,D0
+        (0xC106, 0, 0x4109_0FB8, 6, 0x8D92_ADB4, 0x270B, 0x4109_0FD2, 0x271B), // ABCD D6,D0
+        (0x8501, 2, 0x140C_B5EF, 1, 0x030D_A0BC, 0x2708, 0x140C_B533, 0x2700), // SBCD D1,D2
+        (0x8500, 2, 0x1CD7_ECDF, 0, 0x8659_77A8, 0x271C, 0x1CD7_EC36, 0x2700), // SBCD D0,D2
+        (0x4802, 2, 0x5278_DE0D, 2, 0x5278_DE0D, 0x2717, 0x5278_DE8C, 0x2719), // NBCD D2
+        (0x4801, 1, 0x75B6_C01C, 1, 0x75B6_C01C, 0x270F, 0x75B6_C07E, 0x2713)  // NBCD D1
+    ]
+    for (opcode, destination, value, source, operand, status, result, statusAfter) in cases {
+        let (cpu, _) = try run([opcode]) { cpu, _ in
+            cpu[data: source] = operand
+            cpu[data: destination] = value
+            cpu.statusRegister = status
+        }
+        #expect(cpu[data: destination] == result)
+        #expect(cpu.statusRegister == statusAfter)
+    }
+}
+
+@Test func chkClearsZVCAndLeavesNAloneWithoutATrap() throws {
+    // CHK D0,D2 and CHK D6,D4 within bounds (SingleStepTests 68000 set).
+    for (opcode, bound, value, status, statusAfter) in [
+        (UInt16(0x4580), UInt32(0x0B08_1E7C), UInt32(0x8D4A_0892), UInt16(0x271F), UInt16(0x2718)),
+        (0x4986, 0xDC0E_4C83, 0xF130_41DC, 0x2717, 0x2710)
+    ] {
+        let (cpu, _) = try run([opcode]) { cpu, _ in
+            cpu[data: Int(opcode & 7)] = bound
+            cpu[data: Int((opcode >> 9) & 7)] = value
+            cpu.statusRegister = status
+        }
+        #expect(cpu.programCounter == 0x102)
+        #expect(cpu.statusRegister == statusAfter)
+    }
+}
+
+@Test func chkAndDivideByZeroTrapAfterThePostincrement() throws {
+    // CHK (A0)+,D2 above its bound, then DIVU (A0)+,D0 by zero: A0 has moved on when the
+    // exception is taken, and the stacked SR has Z, V and C clear (N too for these two).
+    for (opcode, vector) in [(UInt16(0x4598), 6), (0x80D8, 5)] {
+        let (cpu, memory) = try run([opcode]) { cpu, memory in
+            cpu[address: 0] = 0x2000
+            cpu[data: 2] = 0x4F0B
+            cpu.statusRegister = 0x271F
+            try memory.writeWord(opcode == 0x4598 ? 1 : 0, at: 0x2000)
+            try memory.writeLong(0x3000, at: UInt32(vector * 4))
+        }
+        #expect(cpu.programCounter == 0x3000)
+        #expect(cpu[address: 0] == 0x2002)
+        var m = memory
+        #expect(try m.readWord(at: 0x7FFA) == 0x2710)
+        #expect(try m.readLong(at: 0x7FFC) == 0x102)
+    }
 }
