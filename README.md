@@ -47,30 +47,55 @@ Swift errors are not yet translated into CPU bus/address-error exceptions.
 
 `Sources/MacMigaCore/MC68000.swift` implements D0–D7, A0–A7, banked
 user/supervisor stack pointers, status bits, and external reset-vector loading.
-The supported instructions are MOVEQ, NOP, BRA, BSR, all 14 Bcc conditions,
-and RTS. Branches support byte and word displacements. Unsupported opcodes
-throw a diagnostic containing the opcode and instruction address.
+The supported instructions are MOVE.B/W/L, MOVEA.W/L, MOVEQ, NOP, BRA, BSR,
+all 14 Bcc conditions, and RTS. MOVE supports register direct, indirect,
+postincrement, predecrement, displacement, brief indexed, absolute, PC-relative
+source, and immediate source addressing. Branches support byte and word
+displacements. Unsupported opcodes throw an opcode/address diagnostic.
 
 This is functional stepping, not cycle-accurate emulation. Prefetch, interrupts,
 trace and other exceptions, and the remaining instruction set are absent.
 CPU registers remain unchanged on a thrown error, but earlier bus writes are
 not rolled back. Odd branch targets fail on the next fetch. Initial register
 values are deterministic host defaults, not hardware power-on guarantees.
+Bus-access ordering is not hardware-accurate, including longword predecrement
+writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-Twenty tests cover the memory foundation and CPU subset. CPU coverage includes
-all 256 MOVEQ immediates across eight registers and both X states, every Bcc
-condition across all 32 CCR values and both displacement lengths, stack banks,
-subroutine returns, displacement limits, unsupported opcodes, and memory faults.
-A synthetic ROM executes after reset; a synthetic RAM program calls and returns.
-Debug and release builds/tests passed on November 25, 2026 using Swift 6.4.2.
+Thirty tests cover the memory foundation and CPU subset. Coverage includes
+MOVE sizes, flags, partial-register writes, all supported addressing modes,
+MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
+encodings, and partial-write faults. Existing exhaustive MOVEQ and branch
+condition tests remain. Synthetic programs exercise calls and memory copying.
+Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
+
+## Local Kickstart startup probe
+
+ROMs remain user-supplied and ignored by Git. From the repository root:
+
+```sh
+swiftc Sources/MacMigaCore/AmigaMemory.swift Sources/MacMigaCore/MC68000.swift Tools/KickstartProbe.swift -o /tmp/MacMiga-KickstartProbe
+/tmp/MacMiga-KickstartProbe "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+```
+
+The probe stops at the first diagnostic or after 10,000 instructions; reaching
+the limit does not establish boot success. The two local files tested on
+November 25, 2026 were each 524,288 bytes. Their measured startup results:
+
+| File | Reset PC | First unsupported opcode | Completed instructions |
+| --- | --- | --- | --- |
+| kickstart-1.3.rom | $00FC00D2 | $4FF9 | 0 |
+| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | $4FF8 | 0 |
+
+Neither ROM booted. The probe reports raw reset-vector values and does not
+validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. Extend CPU execution with effective-address decoding and MOVE/MOVEA, then
-   arithmetic, exceptions, interrupts, and timing.
+1. Extend CPU execution with LEA and control-flow addressing, then arithmetic,
+   remaining instructions, exceptions, interrupts, and timing.
 2. CIA-A/B registers and timers, real overlay control, interrupt routing.
 3. OCS custom chips: raster timing, DMA, bitplanes, Copper, Blitter, and audio.
 4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
