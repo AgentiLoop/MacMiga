@@ -9,11 +9,22 @@ emulated and played through the Mac's default output. The `MacMiga` app shows
 the emulated display in a window and forwards the Mac keyboard and mouse. Booting real AmigaOS
 Workbench disks or games has not been tested.
 
+**Hard disk:** a hardfile (`.hdf`, one AmigaDOS partition) can be attached as
+`DH0`. Kickstart 3.1 and 1.3 both boot from it and run its
+`S/Startup-Sequence`; see "Expansion boards and hard disk" below. WHDLoad has
+not been run yet.
+
 ## Run the app
 
 ```sh
-swift run -c release MacMiga "Kickstart ROMs/kickstart-1.3.rom" [disk.adf]
+swift run -c release MacMiga "Kickstart ROMs/kickstart-1.3.rom" [disk.adf] [disk.hdf]
 ```
+
+A `.hdf` argument, or Machine ▸ Attach Hard Disk (DH0)… (⌘D), attaches a
+hardfile and restarts the machine; Detach Hard Disk removes it. Blocks the
+Amiga writes are saved back into the file about once a second and on quit (a
+file that is not writable is attached write-protected). Machine ▸ 8 MB Fast RAM
+adds a Zorro II memory board (off by default, remembered, restarts the machine).
 
 With no arguments it reuses the last ROM, or `Kickstart ROMs/kickstart-1.3.rom`
 in the current folder, or asks for one. The Machine menu opens a Kickstart ROM
@@ -55,8 +66,9 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
   expansion; `slowRAMSize: 0` gives a stock 512 KiB machine). The rest of
   `$C00000`–`$D7FFFF` mirrors the custom chip registers, which Kickstart detects
   by writing INTENA through it.
-- The Zorro II autoconfig window `$E80000`–`$EFFFFF` is empty (no expansion
-  boards): reads return 0 and writes are ignored.
+- The Zorro II autoconfig window at `$E80000`. With no expansion boards (the
+  default) it is empty: reads return 0 and writes are ignored. Optional boards
+  are described under "Expansion boards and hard disk".
 - A 512 KiB ROM window at `$F80000`–`$FFFFFF`, accepting 256 KiB images
   mirrored within that window or a full 512 KiB image.
 - A power-on ROM overlay over the first 512 KiB only, controlled by CIA-A PA0 (OVL,
@@ -154,6 +166,58 @@ VERTB each frame) and both CIA timers (1 E clock = 10 CPU clocks). CIA-A TOD
 counts frames, CIA-B TOD counts lines. CIA-A /IRQ sets INTREQ PORTS (level 2),
 CIA-B /IRQ sets INTREQ EXTER (level 6).
 
+## Expansion boards and hard disk
+
+`Expansion.swift` is the Zorro II AUTOCONFIG chain. Each unconfigured board in
+turn answers at `$E80000` with its identification ROM in nibbles (inverted
+except er_Type); writing its base address (`$4A`, then `$48`) maps it and lets
+the next board answer, and `$4C` shuts it up. A reset unconfigures every board.
+Two boards exist, both with manufacturer 2011 (the number reserved for boards
+without a registered maker):
+
+- Fast RAM (`fastRAMSize:`, a power of two from 64 KiB to 8 MiB, default none).
+  Kickstart places it in `$200000`–`$9FFFFF` and adds it to the memory list.
+- The hard-disk controller (`hardDisk:`), a 64 KiB board that is not a model of
+  any real controller. Its boot ROM is generated for the assigned address
+  (`$E90000` in practice) and holds a DiagArea with a Resident tag for
+  `macmiga.device`. Kickstart copies the DiagArea and runs it: the device is
+  created, `DH0` is made with MakeDosNode and queued for booting at priority 0
+  (AddBootNode on Kickstart 2.0+, a BootNode on eb_MountList on 1.3), and the
+  BootPoint starts dos.library. A bootable floppy in DF0 has the higher
+  priority (5) and should still boot first; that was not tried.
+
+The 68000 code in the boot ROM is about 80 instructions. The work is done by
+the host through three long-word registers on the board: `$8000` takes an
+IORequest pointer and performs the command at once (CMD_READ, CMD_WRITE,
+TD_FORMAT, TD_PROTSTATUS, TD_GETNUMTRACKS, TD_GETGEOMETRY; motor, seek, update,
+clear and change-state commands succeed with nothing to do; TD_ADDCHANGEINT is
+kept unanswered; anything else, including HD_SCSICMD and 64-bit commands,
+returns IOERR_NOCMD), `$8004` fixes up the Resident tag in the DiagArea copy,
+and `$8008` fills in the device's library node. The controller only touches
+memory, never CPU registers.
+
+`HardDisk` holds a hardfile: one AmigaDOS partition with no partition table, at
+512-byte blocks, 1 surface, 32 blocks per track and 2 reserved blocks (the
+layout UAE uses for hardfiles); blocks past the last whole cylinder are unused.
+The DosType comes from the image's first four bytes (`DOS\0`…`DOS\7`), else
+FFS. Images that start with a Rigid Disk Block (`RDSK`) are rejected. Transfers
+are instant. Only an OFS (`DOS\0`) hardfile was tried under Kickstart 1.3,
+whose ROM has no Fast File System.
+
+Measured with the probe on November 25, 2026, using 1 MiB hardfiles made by a
+script (not committed) that hold only `S/Startup-Sequence` with two `Echo`
+lines, the second redirected to `SYS:proof`:
+
+| ROM | Hardfile | Result with `--limit 60000000` |
+| --- | --- | --- |
+| Kickstart 3.1 | FFS | boot shell shows the echoed line and a `1>` prompt; 9 blocks read, 6 written; the saved image has a new file `proof` with the echoed text and valid root and bitmap checksums |
+| Kickstart 1.3 | OFS | CLI shows `Unknown command Echo` (1.3 has no built-in Echo) and a `1>` prompt; 7 blocks read |
+
+With `--fast 8` both ROMs list a memory header at `$200000`–`$A00000` in
+exec's memory list. In the app, the same FFS hardfile booted under Kickstart
+3.1 and the file on disk received the same changed blocks. Nothing larger than
+these test volumes has been tried: no Workbench installation, no WHDLoad.
+
 ## Audio (Paula)
 
 `Sources/MacMigaCore/Paula.swift` runs four channels every colour clock.
@@ -222,7 +286,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-One hundred and thirteen tests cover the memory foundation and CPU subset. Coverage includes
+One hundred and thirty-five tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -256,6 +320,11 @@ fields, data, no adjacent 1 bits), check ADF size validation, disk change and
 write protect, synced DMA, and that a synced read without a disk never ends.
 Sprite/input tests cover a DMA sprite's colours, position and pointer, attached
 sprites, the keyboard handshake, mouse counters and buttons, and the joystick.
+Expansion tests cover the autoconfig chain (identification nibbles, size codes,
+base-address writes, shut-up, reset), fast RAM mapping, hardfile validation,
+every hard-disk command class with its error codes, write protection, the
+MakeDosNode packet, and the boot ROM's DiagPoint, Open, Close and BeginIO
+routines executed by the CPU against a stand-in ReplyMsg.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -265,8 +334,12 @@ ROMs remain user-supplied and ignored by Git. From the repository root:
 
 ```sh
 swiftc -O Sources/MacMigaCore/*.swift Tools/KickstartProbe.swift -o /tmp/MacMiga-KickstartProbe
-/tmp/MacMiga-KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+/tmp/MacMiga-KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
 ```
+
+`--hdf` attaches a hardfile as DH0 (the file itself is never modified;
+`--hdf-out` writes the image as the Amiga left it), `--fast` adds fast RAM. The
+probe then also prints the expansion boards and the blocks read and written.
 
 The probe stops at the first diagnostic or after `--limit` instructions
 (default 10,000); reaching
@@ -295,18 +368,23 @@ if the sector starts with `MACM`, blue otherwise. With `--adf` and `--limit
 without the marker gives blue. So both ROMs validated the bootblock, ran it, and
 trackdisk.device seeked, read and decoded a sector through disk DMA.
 
-Neither ROM booted. The probe reports raw reset-vector values and does not
-validate ROM identity, checksum, or software compatibility.
+Neither ROM has booted a real Workbench disk. The probe reports raw
+reset-vector values and does not validate ROM identity, checksum, or software
+compatibility.
 
 ## Next milestones
 
-1. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
+1. Hard disk: build a hardfile from a Mac folder, Rigid Disk Block images, and
+   whatever WHDLoad needs beyond that (it requires Kickstart 2.0 or newer).
+2. Split the 68000 core into its own Swift package behind a bus protocol
+   (`MC68000` currently takes `AmigaMemory` directly), so that planned Mac
+   Classic and NeXT emulators can share it.
+3. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
    what breaks.
-2. Remaining CPU pieces: instruction timing; unmapped addresses as bus noise.
-3. OCS custom chips: DMA slot timing, audio modulation and filter.
-4. Disk writes, extra drives, index pulses and accurate disk timing.
-5. Native macOS display/audio interface and user-selected firmware/media.
-6. Verify boot and software compatibility using authorized firmware and media.
+4. Remaining CPU pieces: instruction timing.
+5. OCS custom chips: DMA slot timing, audio modulation and filter.
+6. Disk writes, extra drives, index pulses and accurate disk timing.
+7. Verify boot and software compatibility using authorized firmware and media.
 
 ## Hardware references
 
