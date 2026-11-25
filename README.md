@@ -697,7 +697,7 @@ the 512 KiB machine. For software that needs the extra chip memory, see
 ## Making a hard disk
 
 ```sh
-swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]... [--auto] [--ofs] [--intl] [--skip-long-names] <folder | archive.lha>... <output.hdf>
+swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]... [--auto] [--ofs] [--intl] [--dircache] [--skip-long-names] <folder | archive.lha>... <output.hdf>
 swift run -c release MakeHardfile --rdb [--fs HEXTYPE:VERSION.REVISION:FILE]... <PARTITION>... <output.hdf>
 swift run -c release MakeHardfile --list <folder | archive.lha>
 swift run -c release MakeHardfile --extract <archive.lha> <new folder>
@@ -755,9 +755,22 @@ is an error, nothing is renamed or cut), volumes up to 2 GiB, no links. With
 `international: true` the international mode, whose hash and name comparison
 also fold à–þ (except ÷) to upper case. Checked on Kickstart 3.1: on a volume
 holding `Obst/äpfel`, `If EXISTS OBST/ÄPFEL` found the file on a `DOS\3`
-volume and not on a `DOS\1` one, and `OBST/äpfel` was found on both. The
-directory-cache modes (`DOS\4`, `DOS\5`) and the long-name modes (`DOS\6`,
-`DOS\7`) are not written. From a
+volume and not on a `DOS\1` one, and `OBST/äpfel` was found on both.
+
+`directoryCache: true` (MakeHardfile `--dircache`) writes the directory-cache
+modes, `DOS\5` (FFS) or `DOS\4` (OFS with `--ofs`), which Kickstart 3.0 and
+later read: on top of the international mode, every directory points (long 126
+of its header, the root's too) to a chain of cache blocks (type 33) listing
+each entry's header block, size, protection, date, type, name and comment, so
+that a directory scan reads a few blocks instead of every header. Checked on
+Kickstart 3.1 with a small program that lists a directory through `Examine`
+and `ExNext` (assembled with vasm; not in the repository): it listed every
+entry on `DOS\5` and `DOS\4` volumes, and listed a new file after the script
+had written one, so FFS kept the cache up to date; with one name changed in
+the cache block only, the listing showed the changed name, so the listing came
+from the cache; and after the root's bitmap flag was cleared, the validator's
+rebuilt bitmap matched the writer's except for the two blocks of the file the
+script wrote. The long-name modes (`DOS\6`, `DOS\7`) are not written. From a
 Mac folder only regular files and directories are taken; symbolic links,
 `.DS_Store` and `._*` files are left out, and dates are modification dates in
 local time.

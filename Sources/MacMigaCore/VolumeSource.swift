@@ -59,10 +59,10 @@ extension FastFileSystem {
     /// from the sources. Without one, `autoStart` makes a startup-sequence (see
     /// `VolumeEntry.startupSequence(for:)`) if the sources have none. Files and directories whose path `include` rejects are left out.
     /// `fastFileSystem` false writes an OFS volume, for Kickstart 1.x; `international` the
-    /// international mode.
+    /// international mode; `directoryCache` the directory-cache mode.
     public static func hardfile(from sources: [URL], name: String? = nil, freeBytes: Int? = nil,
                                 startupSequence: String? = nil, autoStart: Bool = false,
-                                fastFileSystem: Bool = true, international: Bool = false,
+                                fastFileSystem: Bool = true, international: Bool = false, directoryCache: Bool = false,
                                 include: ([String]) -> Bool = { _ in true }) throws -> [UInt8] {
         precondition(!sources.isEmpty)
         var entries = try sources.flatMap { try VolumeEntry.entries(of: $0, include: include) }
@@ -82,7 +82,8 @@ extension FastFileSystem {
             entries.append(VolumeEntry(path: ["S", "Startup-Sequence"], contents: text, date: date))
         }
         return try hardfile(named: name ?? (fallback.isEmpty ? "MacMigaHD" : fallback), entries: entries,
-                            freeBytes: freeBytes, date: date, fastFileSystem: fastFileSystem, international: international)
+                            freeBytes: freeBytes, date: date, fastFileSystem: fastFileSystem, international: international,
+                            directoryCache: directoryCache)
     }
 }
 

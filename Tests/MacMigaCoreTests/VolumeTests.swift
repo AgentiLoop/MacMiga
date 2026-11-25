@@ -644,3 +644,63 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
     #expect(VolumeEntry.startupSequence(for: [file("g/G.slave"), file("C/WHDLoad", [1])]) == nil)
     #expect(VolumeEntry.startupSequence(for: [file("g/G.slave"), file("Tools/WHDLoad")]) == "Tools/WHDLoad")
 }
+
+@Test func directoryCacheListsEveryEntry() throws {
+    // 60 entries with long names overflow one cache block; "Empty" gets an empty one.
+    var entries = (0..<60).map { VolumeEntry(path: ["Many", "a file with a long name \($0)"], contents: [UInt8($0)], date: stamp) }
+    var noted = VolumeEntry(path: ["noted"], contents: [1, 2, 3], date: AmigaDate(days: 5000, minutes: 61, ticks: 99))
+    noted.protection = 0x0012_0042
+    noted.comment = "odd"
+    entries += [noted, VolumeEntry(path: ["Empty"], contents: nil, date: stamp)]
+    for fast in [true, false] {
+        let image = try FastFileSystem.hardfile(named: "V", entries: entries, freeBytes: 0, date: stamp, fastFileSystem: fast,
+                                                directoryCache: true)
+        #expect(image.starts(with: [0x44, 0x4F, 0x53, fast ? 5 : 4]))
+        var reader = VolumeReader(image: image)
+        reader.visited = [0, 1, reader.root]
+        _ = reader.tree(reader.root) // headers, hash chains and data, as before
+        /// The records of a directory's cache chain: header block, size, protection, date,
+        /// type, name and comment. Marks the cache blocks as used.
+        func cache(_ directory: Int) -> [(header: Int, size: Int, protection: Int, days: Int, type: Int, name: String, comment: String)] {
+            var records: [(Int, Int, Int, Int, Int, String, String)] = []
+            var block = reader.long(directory, 504)
+            #expect(block != 0)
+            while block != 0 {
+                #expect(reader.sum(block) == 0)
+                #expect(reader.long(block, 0) == 33 && reader.long(block, 4) == block && reader.long(block, 8) == directory)
+                #expect(reader.visited.insert(block).inserted)
+                var at = block * 512 + 24
+                for _ in 0..<reader.long(block, 12) {
+                    func word(_ offset: Int) -> Int { Int(image[at + offset]) << 8 | Int(image[at + offset + 1]) }
+                    let nameLength = Int(image[at + 23])
+                    let name = String(decoding: image[at + 24..<at + 24 + nameLength], as: UTF8.self)
+                    let commentLength = Int(image[at + 24 + nameLength])
+                    let comment = String(decoding: image[at + 25 + nameLength..<at + 25 + nameLength + commentLength], as: UTF8.self)
+                    records.append((word(0) << 16 | word(2), word(4) << 16 | word(6), word(8) << 16 | word(10), word(16),
+                                    Int(Int8(bitPattern: image[at + 22])), name, comment))
+                    at += (25 + nameLength + commentLength + 1) & ~1
+                    #expect(at <= (block + 1) * 512)
+                }
+                block = reader.long(block, 16)
+            }
+            return records
+        }
+        let top = cache(reader.root)
+        #expect(Set(top.map(\.name)) == ["Many", "noted", "Empty"])
+        let note = try #require(top.first { $0.name == "noted" })
+        #expect(note.size == 3 && note.protection == 0x0012_0042 && note.days == 5000 && note.type == -3 && note.comment == "odd")
+        #expect(reader.name(note.header) == "noted" && reader.long(note.header, 500) == reader.root)
+        let many = try #require(top.first { $0.name == "Many" })
+        #expect(many.type == 2 && many.size == 0)
+        #expect(reader.long(reader.long(many.header, 504), 16) != 0) // more than one cache block
+        let listed = cache(many.header)
+        #expect(listed.map(\.name).sorted() == entries.prefix(60).map { $0.path[1] }.sorted())
+        #expect(listed.allSatisfy { reader.name($0.header) == $0.name && $0.size == 1 && $0.type == -3 })
+        let empty = try #require(top.first { $0.name == "Empty" })
+        #expect(cache(empty.header).isEmpty)
+        // The bitmap counts the cache blocks as used.
+        let free = reader.freeBlocks()
+        #expect(free.isDisjoint(with: reader.visited))
+        #expect(free.count + reader.visited.count == reader.blocks)
+    }
+}

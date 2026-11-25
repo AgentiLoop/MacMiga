@@ -114,9 +114,14 @@ public enum FastFileSystem {
     /// `freeBytes` the volume gets 2 MiB of free space or a quarter of its contents, whichever
     /// is more. The image is a whole number of cylinders. `fastFileSystem` false writes OFS;
     /// `international` writes the international mode (`DOS\2` or `DOS\3`), whose names also
-    /// ignore the case of accented letters (Kickstart 2.04 and later).
+    /// ignore the case of accented letters (Kickstart 2.04 and later). `directoryCache`
+    /// writes the directory-cache mode (`DOS\4` or `DOS\5`, always international, Kickstart
+    /// 3.0 and later): each directory also lists its entries in a chain of cache blocks, which
+    /// directory scans read instead of every header.
     public static func hardfile(named volume: String, entries: [VolumeEntry], freeBytes: Int? = nil,
-                                date: AmigaDate, fastFileSystem: Bool = true, international: Bool = false) throws -> [UInt8] {
+                                date: AmigaDate, fastFileSystem: Bool = true, international: Bool = false,
+                                directoryCache: Bool = false) throws -> [UInt8] {
+        let international = international || directoryCache
         let dataSize = fastFileSystem ? blockSize : blockSize - 24
         let root = Node(name: try bytes(ofName: volume), entry: VolumeEntry(path: [], contents: nil, date: date))
         for entry in entries where !entry.path.isEmpty {
@@ -143,10 +148,28 @@ public enum FastFileSystem {
             }
         }
 
+        func comment(_ node: Node) -> [UInt8] {
+            Array(node.entry.comment.unicodeScalars.map { $0.value <= 0xFF ? UInt8($0.value) : 0x3F }.prefix(79))
+        }
+        /// A directory's cache records split into blocks of 488 bytes (at least one block).
+        /// A record: header block, size, protection, owner and group (words), date (three
+        /// words), type and name length (bytes), name, comment length, comment, even length.
+        func cacheBlocks(_ directory: Node) -> [[Node]] {
+            var result: [[Node]] = [[]]
+            var used = 0
+            for child in directory.children {
+                let size = (24 + child.name.count + 1 + comment(child).count + 1) & ~1
+                if used + size > blockSize - 24 { result.append([]); used = 0 }
+                result[result.count - 1].append(child)
+                used += size
+            }
+            return result
+        }
+
         // Size the volume: contents, free space, root, and a bitmap that covers it all.
         func blocks(for node: Node) -> Int {
             guard let contents = node.entry.contents else {
-                return 1 + node.children.reduce(0) { $0 + blocks(for: $1) }
+                return 1 + (directoryCache ? cacheBlocks(node).count : 0) + node.children.reduce(0) { $0 + blocks(for: $1) }
             }
             let data = (contents.count + dataSize - 1) / dataSize
             return 1 + data + max(0, data - 1) / hashSlots
@@ -211,8 +234,7 @@ public enum FastFileSystem {
             put(2, node.block, 0)                           // T_HEADER
             put(node.block, node.block, 4)
             put(Int(node.entry.protection), node.block, 320)
-            putString(Array(node.entry.comment.unicodeScalars.map { $0.value <= 0xFF ? UInt8($0.value) : 0x3F }.prefix(79)),
-                      node.block, 328)
+            putString(comment(node), node.block, 328)
             put(node.entry.date.days, node.block, 420)
             put(node.entry.date.minutes, node.block, 424)
             put(node.entry.date.ticks, node.block, 428)
@@ -237,6 +259,43 @@ public enum FastFileSystem {
                 for (index, child) in sorted.enumerated() {
                     putHeader(child, parent: directory.block, type: child.entry.contents == nil ? 2 : -3)
                     put(index + 1 < sorted.count ? sorted[index + 1].block : 0, child.block, 496) // hash chain
+                }
+            }
+            if directoryCache {
+                let groups = cacheBlocks(directory)
+                let cache = groups.map { _ in allocate() }
+                put(cache[0], directory.block, 504)         // the directory's first cache block
+                for (index, group) in groups.enumerated() {
+                    let block = cache[index]
+                    put(33, block, 0)                       // T_DIRCACHE
+                    put(block, block, 4)
+                    put(directory.block, block, 8)
+                    put(group.count, block, 12)
+                    put(index + 1 < cache.count ? cache[index + 1] : 0, block, 16)
+                    var at = block * blockSize + 24
+                    for child in group {
+                        let start = at
+                        func word(_ value: Int) {
+                            image[at] = UInt8(truncatingIfNeeded: value >> 8)
+                            image[at + 1] = UInt8(truncatingIfNeeded: value)
+                            at += 2
+                        }
+                        word(child.block >> 16); word(child.block)
+                        let size = child.entry.contents?.count ?? 0
+                        word(size >> 16); word(size)
+                        word(Int(child.entry.protection >> 16)); word(Int(child.entry.protection & 0xFFFF))
+                        word(0); word(0)                    // owner, group
+                        word(child.entry.date.days); word(child.entry.date.minutes); word(child.entry.date.ticks)
+                        image[at] = child.entry.contents == nil ? 2 : 0xFD // ST_USERDIR, ST_FILE
+                        image[at + 1] = UInt8(child.name.count)
+                        image.replaceSubrange(at + 2..<at + 2 + child.name.count, with: child.name)
+                        at += 2 + child.name.count
+                        let text = comment(child)
+                        image[at] = UInt8(text.count)
+                        image.replaceSubrange(at + 1..<at + 1 + text.count, with: text)
+                        at = start + ((at + 1 + text.count - start + 1) & ~1)
+                    }
+                    seal(block)
                 }
             }
             for child in directory.children {
@@ -310,7 +369,9 @@ public enum FastFileSystem {
             }
             seal(block, checksumAt: 0)
         }
-        image.replaceSubrange(0..<4, with: [0x44, 0x4F, 0x53, (fastFileSystem ? 1 : 0) | (international ? 2 : 0)]) // DOS\0…DOS\3
+        // DOS\0…DOS\5: OFS/FFS, international, directory cache (which implies international).
+        let mode = directoryCache ? 4 : international ? 2 : 0
+        image.replaceSubrange(0..<4, with: [0x44, 0x4F, 0x53, UInt8(mode + (fastFileSystem ? 1 : 0))])
         return image
     }
 }

@@ -13,6 +13,7 @@ var extract = false
 var autoStart = false
 var ofs = false
 var international = false
+var directoryCache = false
 var rdb = false
 var fileSystems: [String] = []
 while let first = arguments.first, first.hasPrefix("--") {
@@ -23,6 +24,7 @@ while let first = arguments.first, first.hasPrefix("--") {
     else if first == "--auto" { autoStart = true } // run the only program, as the app does
     else if first == "--ofs" { ofs = true }        // for Kickstart 1.x
     else if first == "--intl" { international = true } // DOS\2/DOS\3, for Kickstart 2.04+
+    else if first == "--dircache" { directoryCache = true } // DOS\4/DOS\5, for Kickstart 3.0+
     else if first == "--rdb" { rdb = true }        // a partitioned image from hardfiles
     else if first == "--fs", !arguments.isEmpty { fileSystems.append(arguments.removeFirst()) }
     else if first == "--exclude", !arguments.isEmpty { // a path from the top of a source, any case
@@ -41,7 +43,7 @@ if rdb { makePartitionedImage(arguments, fileSystems: fileSystems) }
 guard list ? arguments.count == 1 : extract ? arguments.count == 2 : arguments.count >= 2 else {
     print("""
     Usage: MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]...
-                        [--auto] [--ofs] [--intl] [--skip-long-names] <folder | archive.lha>... <output.hdf>
+                        [--auto] [--ofs] [--intl] [--dircache] [--skip-long-names] <folder | archive.lha>... <output.hdf>
            MakeHardfile --rdb [--fs HEXTYPE:VERSION.REVISION:FILE]... <PARTITION>... <output.hdf>
              PARTITION: NAME=FILE.hdf or NAME=<MiB>M,type=HEXTYPE, then any of ,pri=N ,noboot ,nomount ,type=HEXTYPE
              e.g. --fs 50465303:19.2:pfs3aio DH0=system.hdf DH1=work.hdf,pri=-1 PFS=200M,type=50465303,noboot
@@ -79,7 +81,7 @@ do {
         var skipped: [String] = []
         let image = try FastFileSystem.hardfile(from: sources, name: name, freeBytes: freeBytes, startupSequence: startup,
                                                 autoStart: autoStart, fastFileSystem: !ofs,
-                                                international: international) { path in
+                                                international: international, directoryCache: directoryCache) { path in
             if excluded.contains(path.map { $0.lowercased() }) { return false }
             if skipNames, let last = path.last, !FastFileSystem.canStore(name: last) {
                 skipped.append(path.joined(separator: "/"))
