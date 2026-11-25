@@ -3,8 +3,9 @@
 A work-in-progress Commodore Amiga 500 emulator for macOS.
 
 **Current milestone: most of the MC68000 instruction set, CIAs and chipset
-registers.** Both local Kickstart ROMs now run their startup code until they
-wait in user mode for interrupts, which are not delivered yet. There is no
+registers, driven by a machine loop with interrupts.** Both local Kickstart ROMs
+now run their startup code, take vertical-blank and CIA interrupts, and reach
+the exec idle STOP. There is no
 application UI, video, audio or floppy yet. MacMiga does not boot AmigaOS or
 run games.
 
@@ -44,16 +45,14 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
   A8–A11. Ports with data direction, timers A/B (latch, one-shot/continuous,
   force load, high-byte start in one-shot, B counting A underflows), 24-bit TOD
   with alarm and read latch, SDR storage, and ICR mask/clear-on-read. Timers and
-  TOD advance only through host calls (`tick(eClocks:)`, `pulseTOD()`); nothing
-  drives them from CPU time yet, and CIA interrupts are not routed to the CPU.
+  TOD are driven by `AmigaMachine` (see below).
   An unselected CIA byte lane reads `$FF` (real hardware: open bus).
 - OCS custom chip registers (`CustomChips.swift`) at `$DFF000`–`$DFFFFF`,
   mirrored every `$200`: set/clear DMACON, INTENA, INTREQ and ADKCON with their
   read-back registers, Paula interrupt-level priority, a PAL beam counter for
   VPOSR/VHPOSR that raises VERTB each frame, and storage of all other writes.
   Word accesses are not split; a byte write appears on both bus halves. No DMA,
-  video, audio, Blitter or Copper behaviour yet, and nothing advances the beam
-  from CPU time. Write-only registers read 0 (real hardware: bus noise).
+  video, audio, Blitter or Copper behaviour yet. Write-only registers read 0 (real hardware: bus noise).
 - `$D80000`–`$DFEFFF` (RTC, A600 Gayle/IDE on other models) is empty on a stock
   A500 here: reads return 0 and writes are ignored.
 - The `$F00000`–`$F7FFFF` diagnostic-cartridge slot is empty: reads return 0
@@ -82,7 +81,7 @@ NEG/NEGX/CLR/NOT/TST/TAS, AND/OR/EOR and their immediate forms (including to
 CCR/SR), BTST/BCHG/BCLR/BSET, ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR (register and
 memory), MULU/MULS/DIVU/DIVS, SWAP, EXT, EXG, MOVEM, MOVE to/from SR and CCR,
 MOVE USP, LINK/UNLK, Scc, DBcc, Bcc/BRA/BSR, RTS, RTR, RTE, TRAP, TRAPV, RESET
-(no device reset) and NOP. Not implemented: ABCD/SBCD/NBCD, CHK, MOVEP, STOP.
+(no device reset), STOP and NOP. Not implemented: ABCD/SBCD/NBCD, CHK, MOVEP.
 MOVE supports register direct,
 indirect, postincrement, predecrement, displacement, brief indexed, absolute,
 PC-relative source, and immediate source addressing. LEA, JMP, and JSR accept
@@ -102,8 +101,22 @@ line F, and MOVEC (68010+, executed by Kickstart to detect the CPU) are processe
 the 68000 way: SR and the return PC are pushed on the supervisor stack and the
 CPU jumps through the vector table.
 
-This is functional stepping, not cycle-accurate emulation. Prefetch, interrupts,
-trace, and bus/address-error exceptions are absent.
+Autovectored interrupts (`interrupt(level:memory:)`) are accepted at level 7 or
+above the SR mask: SR and PC are stacked, the mask is raised and STOP ends.
+Level 7 is treated as level-sensitive (real hardware: edge-triggered).
+
+This is functional stepping, not cycle-accurate emulation. Prefetch, trace, and
+bus/address-error exceptions are absent.
+
+## Machine loop
+
+`Sources/MacMigaCore/AmigaMachine.swift` wires CPU and bus as a PAL A500. Before
+each instruction Paula's interrupt level is presented to the CPU. Each instruction
+is charged a fixed 10 CPU clocks (4 per idle step while stopped) — an estimate,
+not 68000 timing. That time advances the beam (1 colour clock = 2 CPU clocks;
+VERTB each frame) and both CIA timers (1 E clock = 10 CPU clocks). CIA-A TOD
+counts frames, CIA-B TOD counts lines. CIA-A /IRQ sets INTREQ PORTS (level 2),
+CIA-B /IRQ sets INTREQ EXTER (level 6).
 CPU registers remain unchanged on a thrown error, but earlier bus writes are
 not rolled back. Odd branch targets fail on the next fetch. Initial register
 values are deterministic host defaults, not hardware power-on guarantees.
@@ -112,7 +125,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-Eighty-six tests cover the memory foundation and CPU subset. Coverage includes
+Ninety-one tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -134,7 +147,9 @@ immediates and CCR/SR forms, single-operand instructions, NEG/NEGX flags,
 logic, multiply/divide (including overflow), every shift/rotate type, MOVEM,
 LINK/UNLK/PEA/Scc/status moves, CMPM, ADDX/SUBX chains, TRAP/RTE and the
 exception vectors. Memory tests cover chip-RAM mirrors, slow RAM, the custom
-chip mirror, and the empty autoconfig window.
+chip mirror, and the empty autoconfig window. Machine tests cover interrupt
+masking and stacking, STOP woken by VERTB with RTE, STOP privilege, CIA timer
+interrupts routed to INTREQ levels 2 and 6, and TOD driven by the beam.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -152,24 +167,24 @@ The probe stops at the first diagnostic or after `--limit` instructions
 the limit does not establish boot success. The two local files tested on
 November 25, 2026 were each 524,288 bytes. Their measured startup results:
 
-| File | Reset PC | Result with `--limit 50000000` |
+| File | Reset PC | Result with `--limit 30000000` |
 | --- | --- | --- |
-| kickstart-1.3.rom | $00FC00D2 | no error; at the limit in user mode around $00FCAFA6–$00FCAFB8 |
-| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | no error; at the limit in user mode around $00F87DEE–$00F87DF6 |
+| kickstart-1.3.rom | $00FC00D2 | no error; STOP at $00FC0F94, SR=$2000, 19.2 emulated s |
+| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | no error; STOP at $00F81476 at 5–10 emulated s, later a user-mode loop reading CIA-A timer B around $00FBCAD4 |
 
 Both ROMs pass the delay loops, diagnostic slot, overlay switch-off, chip and
-slow RAM sizing, Gayle probe and autoconfig scan, then drop to user mode and
-stay in short loops. Waiting for interrupts is my reading of that, not yet
-confirmed by disassembly; nothing delivers interrupts or advances timers yet.
+slow RAM sizing, Gayle probe and autoconfig scan, enable interrupts (INTENA
+$602E: VERTB, PORTS, SOFT, DSKBLK, EXTER) and Copper/Blitter/disk DMA, then
+idle in STOP between interrupts. With no floppy, display or Blitter yet this is
+presumably the "insert disk" state, but nothing is drawn to confirm it.
 
 Neither ROM booted. The probe reports raw reset-vector values and does not
 validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. A machine loop: advance the beam and CIA timers/TOD from CPU time, route CIA
-   interrupts (INT2/INT6) into INTREQ, and deliver autovectored interrupts to
-   the CPU (plus STOP).
+1. Video: Copper, bitplane DMA and a Denise framebuffer, plus the Blitter, so
+   the Kickstart insert-disk screen can be seen.
 2. Remaining CPU pieces: ABCD/SBCD/NBCD, CHK, MOVEP, bus/address errors, timing.
 3. OCS custom chips: raster timing, DMA, bitplanes, Copper, Blitter, and audio.
 4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
