@@ -99,6 +99,9 @@ final class Emulator {
     /// Runs until the chipset completes one more frame (bounded so a bug cannot hang the UI).
     func runFrame() {
         guard var machine else { return }
+        // The local copy is the only owner while it runs; otherwise the first write of the
+        // frame would copy chip RAM, slow RAM and the frame buffer.
+        self.machine = nil
         let start = machine.memory.video.frameCount
         do {
             var steps = 0
@@ -110,7 +113,6 @@ final class Emulator {
             self.machine = machine
             if machine.memory.video.frameCount % 50 == 0 { saveHardDisk() }
         } catch {
-            self.machine = nil
             onError?(String(format: "Emulation stopped at PC=$%08X: %@", machine.cpu.programCounter, "\(error)"))
         }
     }
