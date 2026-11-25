@@ -145,11 +145,20 @@ core does not have).
   The saved frames and the written hard disk image were identical before and
   after.
 
-`MacMigaCore` re-exports the two public types as `MC68000` and `CPUError`. The
-package has four tests of its own on a 64 KiB RAM bus (reset, a program with a
-loop and a subroutine, STOP ended by an interrupt, the address-error frame,
-illegal and TRAP vectors); the instruction-level tests still run through the
-Amiga bus in `Tests/MacMigaCoreTests`.
+`MacMigaCore` re-exports the two public types as `MC68000` and `CPUError`.
+
+The package carries its own tests, 71 of them, and they use no Amiga code. The
+instruction-level tests were moved here from the MacMiga test target. Their
+checks are unchanged except in two places: the error for an address with
+nothing behind it is now the test bus's own, and the reset test puts its
+vectors in RAM instead of reading them through the Amiga's ROM overlay (the
+MacMiga target has a test for that). They run on `TestBus`, a memory map
+made for them: 2 MiB of RAM at `$000000`, 256 KiB of read-only ROM at
+`$FC0000`, and a hole in between where every access throws. Four more tests
+run on a 64 KiB RAM bus (reset, a program with a loop and a subroutine, STOP
+ended by an interrupt, the address-error frame, illegal and TRAP vectors).
+What the MacMiga target still tests of the CPU is its use in the machine:
+interrupts, STOP, and power-on and reset through the ROM overlay.
 
 ## CPU subset
 
@@ -505,7 +514,10 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-One hundred and fifty-seven tests cover the memory foundation and CPU subset. Coverage includes
+The tests are in two places. `swift test` runs the 91 tests of the Amiga
+machine in `Tests/MacMigaCoreTests`. `swift test --package-path Packages/M68K`
+runs the 71 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
+branch, logic/shift and decimal/MOVEP/CHK tests described below). Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -527,7 +539,8 @@ immediates and CCR/SR forms, single-operand instructions, NEG/NEGX flags,
 logic, multiply/divide (including overflow), every shift/rotate type, MOVEM,
 LINK/UNLK/PEA/Scc/status moves, CMPM, ADDX/SUBX chains, TRAP/RTE and the
 exception vectors. Memory tests cover chip-RAM mirrors, slow RAM, the custom
-chip mirror, and the empty autoconfig window. Machine tests cover interrupt
+chip mirror, and the empty autoconfig window. Machine tests cover power-on and
+reset through the ROM overlay, interrupt
 masking and stacking, STOP woken by VERTB with RTE, STOP privilege, CIA timer
 interrupts routed to INTREQ levels 2 and 6, and TOD driven by the beam. Video
 tests cover Copper MOVE/WAIT/SKIP, the danger bit, frame restart, lowres and
@@ -620,14 +633,13 @@ compatibility.
 
 1. WHDLoad: try more installs and fix what breaks. Hard disk: load file
    systems stored in a partition table; try an image partitioned on an Amiga.
-2. CPU package: move the instruction-level tests onto a plain RAM bus inside
-   `Packages/M68K`; later a 68030/68040 with MMU and FPU for NeXT.
+2. CPU package: instruction timing; later a 68030/68040 with MMU and FPU for
+   NeXT.
 3. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
    what breaks.
-4. Remaining CPU pieces: instruction timing.
-5. OCS custom chips: DMA slot timing, audio modulation and filter.
-6. Disk writes, extra drives, index pulses and accurate disk timing.
-7. Verify boot and software compatibility using authorized firmware and media.
+4. OCS custom chips: DMA slot timing, audio modulation and filter.
+5. Disk writes, extra drives, index pulses and accurate disk timing.
+6. Verify boot and software compatibility using authorized firmware and media.
 
 ## Hardware references
 
