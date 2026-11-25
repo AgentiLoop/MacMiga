@@ -16,7 +16,7 @@ public struct AmigaMemory {
     /// Gary routes `$000000`–`$1FFFFF` to Agnus; 512 KiB of chip RAM repeats through it.
     private static let chipRAMSpace: UInt32 = 0x20_0000
     private let kickstart: [UInt8]
-    private var chipRAM = [UInt8](repeating: 0, count: chipRAMSize)
+    var chipRAM = [UInt8](repeating: 0, count: chipRAMSize)
     /// A501-style "slow" (ranger) RAM at `$C00000`; empty when the machine has none.
     private var slowRAM: [UInt8]
     /// CIA-A (odd bytes, selected by A12 low): OVL/LED/disk/fire inputs, keyboard.
@@ -25,6 +25,9 @@ public struct AmigaMemory {
     public var ciaB = CIA8520()
     /// OCS custom chip registers, decoded at `$DFF000`–`$DFFFFF` (mirrored every `$200`).
     public var custom = CustomChips()
+    /// Copper and display output (Agnus DMA, Denise), driven by `advanceChipset`.
+    public var copper = Copper()
+    public var video = Video()
 
     /// ROM overlay follows CIA-A PA0 (OVL). The line is pulled up, so it is active
     /// while PA0 is still an input after reset.
@@ -55,6 +58,7 @@ public struct AmigaMemory {
         ciaA = CIA8520()
         ciaB = CIA8520()
         custom = CustomChips()
+        copper = Copper()
         return try ResetVectors(
             supervisorStackPointer: readLong(at: 0),
             programCounter: readLong(at: 4)

@@ -11,6 +11,11 @@ public struct CustomChips: Equatable, Sendable {
         public static let potgor = 0x016, serdatr = 0x018, dskbytr = 0x01A
         public static let intenar = 0x01C, intreqr = 0x01E
         public static let dmacon = 0x096, intena = 0x09A, intreq = 0x09C, adkcon = 0x09E
+        public static let copcon = 0x02E, cop1lch = 0x080, cop2lch = 0x084
+        public static let copjmp1 = 0x088, copjmp2 = 0x08A
+        public static let diwstrt = 0x08E, diwstop = 0x090, ddfstrt = 0x092, ddfstop = 0x094
+        public static let bpl1pth = 0x0E0, bplcon0 = 0x100, bplcon1 = 0x102, bplcon2 = 0x104
+        public static let bpl1mod = 0x108, bpl2mod = 0x10A, color00 = 0x180
     }
 
     /// PAL frame geometry in colour clocks (one colour clock = two CPU clocks).
@@ -25,6 +30,10 @@ public struct CustomChips: Equatable, Sendable {
     public private(set) var horizontalPosition = 0
     /// Last value written to each register word (index = offset / 2).
     public private(set) var written = [UInt16](repeating: 0, count: 0x100)
+    /// Live bitplane DMA pointers BPL1PT–BPL6PT (written by CPU/Copper, advanced by DMA).
+    public internal(set) var bitplanePointers = [UInt32](repeating: 0, count: 6)
+    /// Pending COPJMP strobe (1 or 2), consumed by the Copper; 0 when none.
+    var copperJump = 0
 
     public init() {}
 
@@ -61,6 +70,14 @@ public struct CustomChips: Equatable, Sendable {
         case Register.intena: Self.setClear(&intena, value, mask: 0x7FFF)
         case Register.intreq: Self.setClear(&intreq, value, mask: 0x3FFF)
         case Register.adkcon: Self.setClear(&adkcon, value, mask: 0x7FFF)
+        case Register.copjmp1: copperJump = 1
+        case Register.copjmp2: copperJump = 2
+        case Register.bpl1pth...(Register.bpl1pth + 0x16):
+            let plane = (register - Register.bpl1pth) >> 2
+            let pointer = bitplanePointers[plane]
+            bitplanePointers[plane] = register & 2 == 0
+                ? (pointer & 0xFFFF) | UInt32(value & 0x001F) << 16
+                : (pointer & 0x1F_0000) | UInt32(value & 0xFFFE)
         default: break
         }
     }
@@ -70,23 +87,39 @@ public struct CustomChips: Equatable, Sendable {
         intreq |= bits & 0x3FFF
     }
 
+    /// Value of a register as last written by the CPU or Copper.
+    public func register(_ offset: Int) -> UInt16 { written[(offset & 0x1FE) >> 1] }
+
+    /// Copper list start address COP1LC (`list` 1) or COP2LC (`list` 2).
+    public func copperLocation(_ list: Int) -> UInt32 {
+        let high = list == 1 ? Register.cop1lch : Register.cop2lch
+        return (UInt32(register(high)) << 16 | UInt32(register(high + 2))) & 0x1F_FFFE
+    }
+
     /// Advances the beam; each new frame raises VERTB (INTREQ bit 5).
     /// Returns lines (CIA-B TOD input) and frames (CIA-A TOD input) completed.
+    /// No Copper or bitplane DMA happens here; `AmigaMemory.advanceChipset` adds those.
     @discardableResult
     public mutating func advance(colorClocks: Int) -> (lines: Int, frames: Int) {
         var lines = 0, frames = 0
-        horizontalPosition += colorClocks
-        while horizontalPosition >= Self.colorClocksPerLine {
-            horizontalPosition -= Self.colorClocksPerLine
-            lines += 1
-            verticalPosition += 1
-            if verticalPosition >= Self.linesPerFrame {
-                verticalPosition = 0
-                frames += 1
-                intreq |= 0x0020
-            }
+        for _ in 0..<colorClocks {
+            let (line, frame) = stepBeam()
+            if line { lines += 1 }
+            if frame { frames += 1 }
         }
         return (lines, frames)
+    }
+
+    /// Moves the beam one colour clock; reports whether a line and a frame ended.
+    mutating func stepBeam() -> (lineEnded: Bool, frameEnded: Bool) {
+        horizontalPosition += 1
+        guard horizontalPosition >= Self.colorClocksPerLine else { return (false, false) }
+        horizontalPosition = 0
+        verticalPosition += 1
+        guard verticalPosition >= Self.linesPerFrame else { return (true, false) }
+        verticalPosition = 0
+        intreq |= 0x0020
+        return (true, true)
     }
 
     private static func setClear(_ register: inout UInt16, _ value: UInt16, mask: UInt16) {

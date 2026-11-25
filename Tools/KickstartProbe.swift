@@ -1,4 +1,6 @@
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Standalone diagnostic compiled alongside MacMigaCore, not a boot compatibility test.
 @main
@@ -6,12 +8,15 @@ struct KickstartProbe {
     static func main() throws {
         var paths = Array(CommandLine.arguments.dropFirst())
         var limit = 10_000
-        if paths.count >= 2, paths[0] == "--limit", let value = Int(paths[1]), value > 0 {
-            limit = value
+        var frameDirectory: String?
+        while paths.count >= 2, paths[0].hasPrefix("--") {
+            if paths[0] == "--limit", let value = Int(paths[1]), value > 0 { limit = value }
+            else if paths[0] == "--frames" { frameDirectory = paths[1] }
+            else { break }
             paths.removeFirst(2)
         }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe [--limit N] <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] [--frames DIR] <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
@@ -34,6 +39,29 @@ struct KickstartProbe {
                 }
                 print("Diagnostic: \(error)")
             }
+            print("Frames completed: \(machine.memory.video.frameCount)")
+            if let directory = frameDirectory {
+                let name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+                let url = URL(fileURLWithPath: directory).appendingPathComponent(name + ".png")
+                try writePNG(machine.memory.video, to: url)
+                print("Last frame written to \(url.path)")
+            }
         }
+    }
+
+    static func writePNG(_ video: Video, to url: URL) throws {
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(video.pixels.count * 4)
+        for pixel in video.pixels {
+            bytes += [UInt8(pixel >> 16 & 0xFF), UInt8(pixel >> 8 & 0xFF), UInt8(pixel & 0xFF), 255]
+        }
+        let provider = CGDataProvider(data: Data(bytes) as CFData)!
+        let image = CGImage(width: Video.width, height: Video.height, bitsPerComponent: 8, bitsPerPixel: 32,
+                            bytesPerRow: Video.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                            provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { throw CocoaError(.fileWriteUnknown) }
     }
 }

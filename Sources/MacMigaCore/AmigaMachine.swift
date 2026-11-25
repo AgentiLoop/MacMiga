@@ -38,7 +38,7 @@ public struct AmigaMachine {
     public mutating func advance(cpuClocks: Int) {
         clock += UInt64(cpuClocks)
         colorClockRemainder += cpuClocks
-        let (lines, frames) = memory.custom.advance(colorClocks: colorClockRemainder / 2)
+        let (lines, frames) = memory.advanceChipset(colorClocks: colorClockRemainder / 2)
         colorClockRemainder %= 2
         for _ in 0..<lines { memory.ciaB.pulseTOD() }
         for _ in 0..<frames { memory.ciaA.pulseTOD() }
