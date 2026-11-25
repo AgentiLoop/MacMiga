@@ -2,10 +2,11 @@
 
 A work-in-progress Commodore Amiga 500 emulator for macOS.
 
-**Current milestone: Copper, bitplane display and Blitter.** Both local
-Kickstart ROMs now draw their insert-disk screens into an emulated framebuffer
-(written to PNG by the probe). There is no application UI, audio, sprites, or
-disk media yet. MacMiga does not boot AmigaOS or run games.
+**Current milestone: booting from ADF floppy images.** Both local Kickstart
+ROMs draw their insert-disk screens and boot a bootblock from an ADF disk image,
+which then reads further sectors through trackdisk.device. There is no
+application UI, audio, sprites, keyboard or mouse yet. Booting real AmigaOS
+Workbench disks or games has not been tested.
 
 ## Build and test
 
@@ -134,9 +135,17 @@ minterms, descending mode, modulos, inclusive/exclusive fill with FCI, and line
 mode (octants, SING). BZERO is set and INTREQ BLIT raised on completion; BBUSY
 never reads 1. Line texture bit order is unverified.
 
-`FloppyDrive.swift` models an empty internal DF0 on the CIAs: CIA-B port B
-select, motor (latched on select), side, direction and step; CIA-A /RDY, /TK0,
-/WPRO and /CHNG (low: no disk). DF1–DF3 are not connected. No disk DMA or media.
+`FloppyDrive.swift` models the internal DF0 on the CIAs: CIA-B port B select,
+motor (latched on select), side, direction and step; CIA-A /RDY, /TK0, /WPRO and
+/CHNG. `AmigaMemory.insertDisk(adf:)` inserts a 901,120-byte ADF image (always
+write-protected); /CHNG stays low after power-on or eject until a step pulse
+with a disk present. The track under the head is encoded as standard AmigaDOS
+MFM (11 sectors with sync `$4489`, header/data checksums, odd/even split, gap;
+6,334 words). Disk DMA starts on the second DSKLEN write with DMAEN while DSKEN
+is on and completes at once: with ADKCON WORDSYNC it waits for DSKSYNC in the
+rotating track (raising DSKSYN), then copies the following words; completion
+raises DSKBLK. Disk writes are discarded. DF1–DF3, index pulses, drive ID,
+bit-rate timing, and non-DOS (custom MFM) disk formats are not implemented.
 CPU registers remain unchanged on a thrown error, but earlier bus writes are
 not rolled back. Odd branch targets fail on the next fetch. Initial register
 values are deterministic host defaults, not hardware power-on guarantees.
@@ -145,7 +154,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-One hundred and four tests cover the memory foundation and CPU subset. Coverage includes
+One hundred and nine tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -173,7 +182,10 @@ interrupts routed to INTREQ levels 2 and 6, and TOD driven by the beam. Video
 tests cover Copper MOVE/WAIT/SKIP, the danger bit, frame restart, lowres and
 hires placement, modulos and HAM. Blitter tests cover shifted/masked copies,
 three-source minterms with modulos, fill modes, BZERO, waiting for BLTEN and a
-line. A drive test covers selection, motor latch, stepping and status lines.
+line. A drive test covers selection, motor latch, stepping and status lines. Disk
+tests decode a generated MFM track back to all 11 sectors (checksums, info
+fields, data, no adjacent 1 bits), check ADF size validation, disk change and
+write protect, synced DMA, and that a synced read without a disk never ends.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -183,7 +195,7 @@ ROMs remain user-supplied and ignored by Git. From the repository root:
 
 ```sh
 swiftc -O Sources/MacMigaCore/*.swift Tools/KickstartProbe.swift -o /tmp/MacMiga-KickstartProbe
-/tmp/MacMiga-KickstartProbe [--limit N] [--frames DIR] "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+/tmp/MacMiga-KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
 ```
 
 The probe stops at the first diagnostic or after `--limit` instructions
@@ -205,16 +217,24 @@ DF0 reported "no disk", 1.3 waited forever for a disk read and never enabled
 bitplanes. These were checked by decoding the PNGs into text, not by comparison
 with real hardware.
 
+Boot test: a self-made ADF (not committed; ADF files are ignored by Git) whose
+hand-assembled bootblock calls AllocMem, reads the disk's last sector (cylinder
+79, side 1) with DoIO/CMD_READ, then turns the Copper off and fills COLOR00 red
+if the sector starts with `MACM`, blue otherwise. With `--adf` and `--limit
+30000000`, both Kickstart 1.3 and 3.1 end with an all-red frame; the same disk
+without the marker gives blue. So both ROMs validated the bootblock, ran it, and
+trackdisk.device seeked, read and decoded a sector through disk DMA.
+
 Neither ROM booted. The probe reports raw reset-vector values and does not
 validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. Floppy: ADF images, MFM disk DMA (DSKLEN/DSKSYNC/DSKBLK), disk change, so
-   Workbench disks boot; sprites for the mouse pointer.
+1. Sprites (mouse pointer), keyboard (CIA-A serial) and mouse/joystick input,
+   then boot a real Workbench disk.
 2. Remaining CPU pieces: ABCD/SBCD/NBCD, CHK, MOVEP, bus/address errors, timing.
 3. OCS custom chips: sprites, DMA slot timing, and audio.
-4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
+4. Disk writes, extra drives, index pulses and accurate disk timing.
 5. Native macOS display/audio interface and user-selected firmware/media.
 6. Verify boot and software compatibility using authorized firmware and media.
 
