@@ -12,8 +12,36 @@ public enum CPUError: Error, Equatable {
 /// The members are `@inlinable` so that a client module compiles the generic code
 /// specialized for its own bus type.
 public struct MC68000: Equatable, Sendable {
-    @usableFromInline var dataRegisters = [UInt32](repeating: 0, count: 8)
-    @usableFromInline var addressRegisters = [UInt32](repeating: 0, count: 7)
+    /// Eight 32-bit registers stored inside the CPU value itself, so that copying the CPU
+    /// (every instruction works on a copy and commits it on success) is a plain memory copy
+    /// with no allocation or reference counting.
+    @usableFromInline struct Registers: Equatable, Sendable {
+        @usableFromInline var r0: UInt32 = 0
+        @usableFromInline var r1: UInt32 = 0
+        @usableFromInline var r2: UInt32 = 0
+        @usableFromInline var r3: UInt32 = 0
+        @usableFromInline var r4: UInt32 = 0
+        @usableFromInline var r5: UInt32 = 0
+        @usableFromInline var r6: UInt32 = 0
+        @usableFromInline var r7: UInt32 = 0
+
+        @inlinable init() {}
+
+        @inlinable subscript(index: Int) -> UInt32 {
+            get {
+                precondition((0..<8).contains(index))
+                return withUnsafeBytes(of: self) { $0.load(fromByteOffset: index * 4, as: UInt32.self) }
+            }
+            set {
+                precondition((0..<8).contains(index))
+                withUnsafeMutableBytes(of: &self) { $0.storeBytes(of: newValue, toByteOffset: index * 4, as: UInt32.self) }
+            }
+        }
+    }
+
+    @usableFromInline var dataRegisters = Registers()
+    /// A0–A6; A7 is `userStackPointer` or `supervisorStackPointer` (the eighth slot is unused).
+    @usableFromInline var addressRegisters = Registers()
     @usableFromInline var status: UInt16 = 0x2700
     public var programCounter: UInt32 = 0
     public var userStackPointer: UInt32 = 0
