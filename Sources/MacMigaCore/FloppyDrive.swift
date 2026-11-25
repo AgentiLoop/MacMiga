@@ -66,6 +66,8 @@ public struct FloppyDrive: Equatable, Sendable {
             return Array(image[offset..<offset + count])
         }
         func dos(_ offset: Int, _ length: Int) throws -> [UInt8] {
+            // An unused track may be stored with length 0; it reads as zeros.
+            if length == 0 { return [UInt8](repeating: 0, count: trackSize) }
             guard length >= trackSize else { throw FloppyError.invalidExtendedADF }
             return try bytes(offset, trackSize)
         }

@@ -155,6 +155,14 @@ private func startDiskRead(_ memory: inout AmigaMemory, words: UInt16, sync: Boo
     // A track running past the end of the file, or an AmigaDOS track shorter than 11 sectors.
     #expect(throws: FloppyError.invalidExtendedADF) { try drive.insert(adf: old(cut: 1)) }
     #expect(throws: FloppyError.invalidExtendedADF) { try drive.insert(adf: old(dosLength: 512)) }
+    // An AmigaDOS track stored with length 0 is an unused track of zeros.
+    var unused = Array(old().prefix(8 + 160 * 4))
+    unused.replaceSubrange(8 + 5 * 4..<8 + 6 * 4, with: [0, 0, 0, 0])
+    unused += [UInt8](repeating: 0xAA, count: 4)
+    for track in 1..<160 where track != 5 { unused += Array(adf[track * 5632..<(track + 1) * 5632]) }
+    try drive.insert(adf: unused)
+    #expect(drive.disk?[5 * 5632..<6 * 5632].allSatisfy { $0 == 0 } == true)
+    #expect(drive.disk?[6 * 5632..<7 * 5632] == adf[6 * 5632..<7 * 5632])
     // A UAE-1ADF track claiming 4 GB of data is rejected without being allocated.
     var new = Array("UAE-1ADF".utf8) + [0, 0, 0, 1]
     new += [0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xF0, 0, 0, 0, 0] + [0x44, 0x89]
