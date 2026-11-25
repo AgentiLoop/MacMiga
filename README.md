@@ -132,8 +132,17 @@ Autovectored interrupts (`interrupt(level:memory:)`) are accepted at level 7 or
 above the SR mask: SR and PC are stacked, the mask is raised and STOP ends.
 Level 7 is treated as level-sensitive (real hardware: edge-triggered).
 
-This is functional stepping, not cycle-accurate emulation. Prefetch, trace, and
-bus/address-error exceptions are absent.
+This is functional stepping, not cycle-accurate emulation. Prefetch and trace
+are absent. A word or long access to an odd address (including an opcode fetch
+after a jump to an odd target) takes the address-error exception: vector 3 with
+the 14-byte group 0 frame (access type and function code, access address,
+opcode, SR, PC). The stacked PC is the odd address for a fetch fault, otherwise
+the instruction address + 2 (hardware stacks 2–10 bytes past it). A fault while
+writing that frame stops emulation instead of halting the CPU. Setting
+`cpu.stopsOnAddressError = true` rethrows `MemoryBusError.unalignedAddress`
+instead, as the fault-preservation tests do. Unmapped addresses still stop
+emulation with `MemoryBusError.unmappedAddress` (the A500 has no bus-error
+source, so real reads there return bus noise).
 
 ## Machine loop
 
@@ -290,7 +299,7 @@ validate ROM identity, checksum, or software compatibility.
 
 1. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
    what breaks.
-2. Remaining CPU pieces: bus/address errors, instruction timing.
+2. Remaining CPU pieces: instruction timing; unmapped addresses as bus noise.
 3. OCS custom chips: DMA slot timing, audio modulation and filter.
 4. Disk writes, extra drives, index pulses and accurate disk timing.
 5. Native macOS display/audio interface and user-selected firmware/media.
