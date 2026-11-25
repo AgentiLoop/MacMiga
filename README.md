@@ -11,8 +11,10 @@ Workbench disks or games has not been tested.
 
 **Hard disk:** a hardfile (`.hdf`, one AmigaDOS partition) can be attached as
 `DH0`. Kickstart 3.1 and 1.3 both boot from it and run its
-`S/Startup-Sequence`; see "Expansion boards and hard disk" below. WHDLoad has
-not been run yet.
+`S/Startup-Sequence`; see "Expansion boards and hard disk" below. A hardfile
+can be made from a Mac folder or an LHA archive (see "Making a hard disk"); a
+game made that way from an LHA archive started from the hard disk under
+Kickstart 3.1. WHDLoad has not been run yet.
 
 ## Run the app
 
@@ -23,7 +25,9 @@ swift run -c release MacMiga "Kickstart ROMs/kickstart-1.3.rom" [disk.adf] [disk
 A `.hdf` argument, or Machine ▸ Attach Hard Disk (DH0)… (⌘D), attaches a
 hardfile and restarts the machine; Detach Hard Disk removes it. Blocks the
 Amiga writes are saved back into the file about once a second and on quit (a
-file that is not writable is attached write-protected). Machine ▸ 8 MB Fast RAM
+file that is not writable is attached write-protected). Machine ▸ New Hard Disk
+from Folder or LHA… asks for a folder or archive and for where to save the new
+`.hdf`, builds it and attaches it. Machine ▸ 8 MB Fast RAM
 adds a Zorro II memory board (off by default, remembered, restarts the machine).
 
 With no arguments it reuses the last ROM, or `Kickstart ROMs/kickstart-1.3.rom`
@@ -254,6 +258,51 @@ exec's memory list. In the app, the same FFS hardfile booted under Kickstart
 3.1 and the file on disk received the same changed blocks. Nothing larger than
 these test volumes has been tried: no Workbench installation, no WHDLoad.
 
+## Making a hard disk
+
+```sh
+swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMANDS"] <folder | archive.lha> <output.hdf>
+swift run -c release MakeHardfile --list <folder | archive.lha>
+```
+
+`MakeHardfile` writes a hardfile holding the contents of a Mac folder or of an
+LHA archive, ready to attach as DH0. `--startup` puts the given text in
+`S/Startup-Sequence` (replacing one from the source), so
+`--startup "pacman_HD/pacman"` makes a disk that starts that program when it
+boots. Without a startup-sequence Kickstart 3.1 boots to a `1>` shell prompt.
+The volume is named after the folder or archive unless `--name` is given, and
+has 2 MiB of free space, or a quarter of its contents if that is more, unless
+`--free` is given.
+
+`VolumeBuilder.swift` (`FastFileSystem.hardfile`) writes the volume: Fast File
+System (`DOS\1`), 512-byte blocks, root block in the middle, hash-table
+directories with chains in ascending block order, file headers with extension
+blocks, and a bitmap with extension blocks for volumes over 52 MB. Limits:
+names of at most 30 ISO Latin-1 characters without `/` or `:` (anything else
+is an error, nothing is renamed or cut), volumes up to 2 GiB, no links. Kickstart
+1.3's ROM cannot read these volumes (it has only the old file system). From a
+Mac folder only regular files and directories are taken; symbolic links,
+`.DS_Store` and `._*` files are left out, and dates are modification dates in
+local time.
+
+`LHA.swift` (`LHA.unpack`) reads LHA archives with header levels 0, 1 and 2 and
+the methods `-lh0-` (stored), `-lh4-` to `-lh7-` and `-lhd-` (directories),
+checking each file's CRC-16. Other methods, including the older `-lh1-`, are
+reported as unsupported. For archives made on an Amiga the protection bits and
+file comments are kept.
+
+Checked on November 25, 2026 with Kickstart 3.1 and the probe:
+
+| Hardfile | Result |
+| --- | --- |
+| from a game's LHA archive (4 files, one program of 236,416 bytes; every CRC-16 matched), with `--startup` naming the program | the program was loaded from DH0 (479 blocks read) and drew its maze screen, with the same display registers and palette as a floppy image of the game shows under Kickstart 1.3 |
+| from a Mac folder: a 40 KB startup-sequence (80 blocks, so it needs an extension block), 200 files in one directory, nested and empty directories | the script ran to its last line; its `If EXISTS` tests found a file in the 200-file directory, a nested file and the empty directory, and a file it wrote was found again |
+| the archive's volume, and a 60 MB one (31 bitmap blocks and a bitmap extension block), each with its bitmap marked invalid | AmigaDOS validated the volume and wrote a bitmap marking exactly the same blocks free as the writer had |
+| the same 60 MB volume, unmodified | mounted with 37 blocks read (the 31 bitmap blocks among them) and none written |
+
+The app's New Hard Disk menu item was built but its file panels were not
+operated; it calls the same code as the tool.
+
 ## Audio (Paula)
 
 `Sources/MacMigaCore/Paula.swift` runs four channels every colour clock.
@@ -322,7 +371,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-One hundred and thirty-five tests cover the memory foundation and CPU subset. Coverage includes
+One hundred and forty-six tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -361,6 +410,15 @@ base-address writes, shut-up, reset), fast RAM mapping, hardfile validation,
 every hard-disk command class with its error codes, write protection, the
 MakeDosNode packet, and the boot ROM's DiagPoint, Open, Close and BeginIO
 routines executed by the CPU against a stand-in ReplyMsg.
+Volume tests cover LHA unpacking (the CRC-16 check value, an `-lh5-` stream
+with literals, overlapping and long matches and two blocks, made by a small
+encoder in the test, header levels 0–2, directory and file-name headers, Amiga
+attributes and comments, and damaged archives), DateStamp conversion, the name
+hash, and volumes read back by a separate reader in the test: files of every
+size class up to several extension blocks, hash chains, nested and empty
+directories, metadata, a bitmap that marks exactly the unused blocks, bitmap
+extension blocks, name and conflict errors, and a Mac folder turned into
+entries and into a hardfile.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -409,8 +467,9 @@ compatibility.
 
 ## Next milestones
 
-1. Hard disk: build a hardfile from a Mac folder, Rigid Disk Block images, and
-   whatever WHDLoad needs beyond that (it requires Kickstart 2.0 or newer).
+1. Hard disk: run WHDLoad itself from a hardfile (it requires Kickstart 2.0 or
+   newer and its own program files) and fix what breaks; Rigid Disk Block
+   images.
 2. CPU package: move the instruction-level tests onto a plain RAM bus inside
    `Packages/M68K`; later a 68030/68040 with MMU and FPU for NeXT.
 3. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
