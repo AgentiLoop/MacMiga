@@ -96,23 +96,27 @@ public enum FastFileSystem {
         return scalars.map { UInt8($0.value) }
     }
 
-    static func uppercased(_ name: [UInt8]) -> [UInt8] {
-        name.map { $0 >= 0x61 && $0 <= 0x7A ? $0 - 0x20 : $0 }
+    /// Upper case as the file system compares names: A–Z only, or with `international`
+    /// (`DOS\2`, `DOS\3`) also the ISO Latin-1 letters à–þ except ÷.
+    static func uppercased(_ name: [UInt8], international: Bool = false) -> [UInt8] {
+        name.map { $0 >= 0x61 && $0 <= 0x7A || international && $0 >= 0xE0 && $0 <= 0xFE && $0 != 0xF7 ? $0 - 0x20 : $0 }
     }
 
     /// The hash-table slot of a name on a `DOS\0`/`DOS\1` volume.
-    static func hash(_ name: [UInt8]) -> Int {
+    static func hash(_ name: [UInt8], international: Bool = false) -> Int {
         var value = name.count
-        for byte in uppercased(name) { value = (value * 13 + Int(byte)) & 0x7FF }
+        for byte in uppercased(name, international: international) { value = (value * 13 + Int(byte)) & 0x7FF }
         return value % hashSlots
     }
 
     /// Builds a hardfile holding `entries`. Directories that are only mentioned in a path are
     /// created with the volume's date; a file given twice keeps its last version. Without
     /// `freeBytes` the volume gets 2 MiB of free space or a quarter of its contents, whichever
-    /// is more. The image is a whole number of cylinders. `fastFileSystem` false writes OFS.
+    /// is more. The image is a whole number of cylinders. `fastFileSystem` false writes OFS;
+    /// `international` writes the international mode (`DOS\2` or `DOS\3`), whose names also
+    /// ignore the case of accented letters (Kickstart 2.04 and later).
     public static func hardfile(named volume: String, entries: [VolumeEntry], freeBytes: Int? = nil,
-                                date: AmigaDate, fastFileSystem: Bool = true) throws -> [UInt8] {
+                                date: AmigaDate, fastFileSystem: Bool = true, international: Bool = false) throws -> [UInt8] {
         let dataSize = fastFileSystem ? blockSize : blockSize - 24
         let root = Node(name: try bytes(ofName: volume), entry: VolumeEntry(path: [], contents: nil, date: date))
         for entry in entries where !entry.path.isEmpty {
@@ -120,7 +124,7 @@ public enum FastFileSystem {
             for (depth, component) in entry.path.enumerated() {
                 let name = try bytes(ofName: component)
                 let isLast = depth == entry.path.count - 1
-                let key = uppercased(name)
+                let key = uppercased(name, international: international)
                 if let existing = node.index[key] {
                     let child = node.children[existing]
                     let wantsDirectory = !isLast || entry.contents == nil
@@ -226,7 +230,7 @@ public enum FastFileSystem {
         func write(directory: Node) {
             for child in directory.children { child.block = allocate() }
             var chains = [[Node]](repeating: [], count: hashSlots)
-            for child in directory.children { chains[hash(child.name)].append(child) }
+            for child in directory.children { chains[hash(child.name, international: international)].append(child) }
             for (slot, chain) in chains.enumerated() {
                 let sorted = chain.sorted { $0.block < $1.block }
                 if let first = sorted.first { put(first.block, directory.block, 24 + slot * 4) }
@@ -306,7 +310,7 @@ public enum FastFileSystem {
             }
             seal(block, checksumAt: 0)
         }
-        image.replaceSubrange(0..<4, with: [0x44, 0x4F, 0x53, fastFileSystem ? 1 : 0]) // DOS\1 or DOS\0
+        image.replaceSubrange(0..<4, with: [0x44, 0x4F, 0x53, (fastFileSystem ? 1 : 0) | (international ? 2 : 0)]) // DOS\0…DOS\3
         return image
     }
 }

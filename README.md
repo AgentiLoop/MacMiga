@@ -697,7 +697,7 @@ the 512 KiB machine. For software that needs the extra chip memory, see
 ## Making a hard disk
 
 ```sh
-swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]... [--auto] [--ofs] [--skip-long-names] <folder | archive.lha>... <output.hdf>
+swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]... [--auto] [--ofs] [--intl] [--skip-long-names] <folder | archive.lha>... <output.hdf>
 swift run -c release MakeHardfile --rdb [--fs HEXTYPE:VERSION.REVISION:FILE]... <PARTITION>... <output.hdf>
 swift run -c release MakeHardfile --list <folder | archive.lha>
 swift run -c release MakeHardfile --extract <archive.lha> <new folder>
@@ -723,7 +723,11 @@ files and directories whose names an Amiga volume cannot hold, instead of
 stopping at the first one. `--auto` writes a startup-sequence that runs the
 sources' only program when they have exactly one (WHDLoad `.slave` files are
 not counted) and no startup-sequence of their own; `--ofs` writes the old file
-system, for Kickstart 1.x. The app's Machine > New Hard Disk from Folder or LHA…
+system, for Kickstart 1.x; `--intl` the international mode (`DOS\3`, or
+`DOS\2` with `--ofs`), in which names also match regardless of the case of
+accented letters (Kickstart 2.04 and later). The `--startup` text is written in
+ISO Latin-1, the character set AmigaDOS reads, with accents composed (macOS
+may pass them decomposed on a command line). The app's Machine > New Hard Disk from Folder or LHA…
 does both itself, choosing OFS when the loaded Kickstart is older than 2.0.
 
 `--rdb` puts hardfiles behind a partition table instead (`RigidDiskBuilder`):
@@ -746,7 +750,13 @@ blocks, and a bitmap with extension blocks for volumes over 52 MB. Limits:
 names of at most 30 ISO Latin-1 characters without `/` or `:` (anything else
 is an error, nothing is renamed or cut), volumes up to 2 GiB, no links. With
 `fastFileSystem: false` it writes the old file system (`DOS\0`, data blocks of
-488 bytes behind a header), which is what Kickstart 1.3's ROM reads. From a
+488 bytes behind a header), which is what Kickstart 1.3's ROM reads, and with
+`international: true` the international mode, whose hash and name comparison
+also fold à–þ (except ÷) to upper case. Checked on Kickstart 3.1: on a volume
+holding `Obst/äpfel`, `If EXISTS OBST/ÄPFEL` found the file on a `DOS\3`
+volume and not on a `DOS\1` one, and `OBST/äpfel` was found on both. The
+directory-cache modes (`DOS\4`, `DOS\5`) and the long-name modes (`DOS\6`,
+`DOS\7`) are not written. From a
 Mac folder only regular files and directories are taken; symbolic links,
 `.DS_Store` and `._*` files are left out, and dates are modification dates in
 local time.

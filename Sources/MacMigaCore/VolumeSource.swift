@@ -59,10 +59,11 @@ extension FastFileSystem {
     /// from the sources. Without one, `autoStart` makes a startup-sequence that runs the
     /// sources' only AmigaDOS program (WHDLoad slaves aside), if they have exactly one and no
     /// `S/Startup-Sequence`. Files and directories whose path `include` rejects are left out.
-    /// `fastFileSystem` false writes an OFS volume, for Kickstart 1.x.
+    /// `fastFileSystem` false writes an OFS volume, for Kickstart 1.x; `international` the
+    /// international mode.
     public static func hardfile(from sources: [URL], name: String? = nil, freeBytes: Int? = nil,
                                 startupSequence: String? = nil, autoStart: Bool = false,
-                                fastFileSystem: Bool = true,
+                                fastFileSystem: Bool = true, international: Bool = false,
                                 include: ([String]) -> Bool = { _ in true }) throws -> [UInt8] {
         precondition(!sources.isEmpty)
         var entries = try sources.flatMap { try VolumeEntry.entries(of: $0, include: include) }
@@ -86,9 +87,12 @@ extension FastFileSystem {
             }
         }
         if let startupSequence {
-            entries.append(VolumeEntry(path: ["S", "Startup-Sequence"], contents: Array((startupSequence + "\n").utf8), date: date))
+            // AmigaDOS reads scripts as ISO Latin-1 (accents composed, as macOS may pass
+            // them decomposed); other characters become `?`.
+            let text = (startupSequence + "\n").precomposedStringWithCanonicalMapping.unicodeScalars.map { $0.value <= 0xFF ? UInt8($0.value) : 0x3F }
+            entries.append(VolumeEntry(path: ["S", "Startup-Sequence"], contents: text, date: date))
         }
         return try hardfile(named: name ?? (fallback.isEmpty ? "MacMigaHD" : fallback), entries: entries,
-                            freeBytes: freeBytes, date: date, fastFileSystem: fastFileSystem)
+                            freeBytes: freeBytes, date: date, fastFileSystem: fastFileSystem, international: international)
     }
 }

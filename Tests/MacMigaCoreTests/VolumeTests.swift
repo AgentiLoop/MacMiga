@@ -543,3 +543,36 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
     try Data(program).write(to: game.appendingPathComponent("editor"))
     #expect(startup(try FastFileSystem.hardfile(from: [folder], autoStart: true)) == nil)
 }
+
+@Test func internationalModeFoldsAccentedLetters() throws {
+    let lower = Array("\u{E4}pfel".unicodeScalars.map { UInt8($0.value) })
+    let upper = Array("\u{C4}PFEL".unicodeScalars.map { UInt8($0.value) })
+    #expect(FastFileSystem.hash(lower, international: true) == FastFileSystem.hash(upper, international: true))
+    #expect(FastFileSystem.hash(lower) != FastFileSystem.hash(upper))
+    #expect(FastFileSystem.uppercased([0xF7, 0xFF, 0xE0, 0xFE], international: true) == [0xF7, 0xFF, 0xC0, 0xDE]) // ÷ and ÿ stay
+    func file(_ name: String) -> VolumeEntry { VolumeEntry(path: ["D", name], contents: [1], date: stamp) }
+    // Names that differ only in the case of an accented letter are one name in international mode.
+    let image = try FastFileSystem.hardfile(named: "V", entries: [file("\u{E4}pfel"), file("\u{C4}pfel")], freeBytes: 0, date: stamp,
+                                            international: true)
+    #expect(image.starts(with: [0x44, 0x4F, 0x53, 0x03]))
+    var reader = VolumeReader(image: image)
+    reader.visited = [0, 1, reader.root]
+    let kept: [String: [UInt8]?] = ["D": nil, "D/\u{E4}pfel": [1]] // first name, last contents
+    #expect(reader.tree(reader.root) == kept)
+    let ofs = try FastFileSystem.hardfile(named: "V", entries: [file("\u{E4}pfel"), file("\u{C4}pfel")], freeBytes: 0, date: stamp,
+                                          fastFileSystem: false, international: true)
+    #expect(ofs.starts(with: [0x44, 0x4F, 0x53, 0x02]))
+    var plain = VolumeReader(image: try FastFileSystem.hardfile(named: "V", entries: [file("\u{E4}pfel"), file("\u{C4}pfel")], freeBytes: 0, date: stamp))
+    plain.visited = [0, 1, plain.root]
+    #expect(plain.tree(plain.root).count == 3)
+}
+
+@Test func startupSequenceIsLatin1() throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent("MacMigaTests-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: folder) }
+    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    // "Ä" decomposed, as macOS may pass it on a command line, and a character Latin-1 lacks.
+    var reader = VolumeReader(image: try FastFileSystem.hardfile(from: [folder], startupSequence: "Echo A\u{308}€"))
+    reader.visited = [0, 1, reader.root]
+    #expect(reader.tree(reader.root)["S/Startup-Sequence"] == .some([0x45, 0x63, 0x68, 0x6F, 0x20, 0xC4, 0x3F, 0x0A]))
+}
