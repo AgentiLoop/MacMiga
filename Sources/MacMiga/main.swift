@@ -480,6 +480,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func ejectDisk() { emulator.eject(); updateTitle() }
     @objc func chooseHardDisk() { if let url = choose(["hdf"]) { attach(hardDisk: url) } }
     @objc func detachHardDisk() { attach(hardDisk: nil) }
+
+    /// Builds a hardfile from a Mac folder or an LHA archive, saves it where the user chooses
+    /// and attaches it, so that what the Amiga writes later is kept in that file.
+    @objc func newHardDisk() {
+        let open = NSOpenPanel()
+        open.message = "Choose a folder or an LHA archive to make a hard disk from"
+        open.canChooseDirectories = true
+        open.allowedContentTypes = ["lha", "lzh"].compactMap { UTType(filenameExtension: $0) }
+        guard open.runModal() == .OK, let source = open.url else { return }
+        let save = NSSavePanel()
+        save.message = "Save the new hard disk image"
+        save.allowedContentTypes = ["hdf"].compactMap { UTType(filenameExtension: $0) }
+        save.directoryURL = source.deletingLastPathComponent()
+        save.nameFieldStringValue = source.deletingPathExtension().lastPathComponent + ".hdf"
+        guard save.runModal() == .OK, let destination = save.url else { return }
+        do {
+            try Data(try FastFileSystem.hardfile(from: source)).write(to: destination)
+        } catch {
+            alert("Could not make a hard disk from \(source.lastPathComponent): \(error)")
+            return
+        }
+        attach(hardDisk: destination)
+    }
     @objc func toggleFastRAM(_ sender: NSMenuItem) {
         do { try emulator.setFastRAM(!emulator.fastRAM) } catch { alert("Reset failed: \(error)") }
         sender.state = emulator.fastRAM ? .on : .off
@@ -504,6 +527,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         machine.addItem(withTitle: "Eject Disk", action: #selector(ejectDisk), keyEquivalent: "e")
         machine.addItem(.separator())
         machine.addItem(withTitle: "Attach Hard Disk (DH0)…", action: #selector(chooseHardDisk), keyEquivalent: "d")
+        machine.addItem(withTitle: "New Hard Disk from Folder or LHA…", action: #selector(newHardDisk), keyEquivalent: "")
         machine.addItem(withTitle: "Detach Hard Disk", action: #selector(detachHardDisk), keyEquivalent: "")
         let fast = machine.addItem(withTitle: "8 MB Fast RAM", action: #selector(toggleFastRAM(_:)), keyEquivalent: "")
         fast.state = emulator.fastRAM ? .on : .off
