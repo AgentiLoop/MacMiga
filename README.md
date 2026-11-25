@@ -565,7 +565,7 @@ swift run -c release MacMiga "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom" 
 ```
 
 `Developer` (compilers and headers, three quarters of the CD, with file names
-too long for an Amiga volume) is left out; the image is then 122 MB.
+too long for an Amiga volume) is left out; the image is then about 128 MB.
 `--skip-long-names` leaves out ten font files whose names have 31 or 32
 characters. With 8 MB Fast RAM on, the desktop is there after about 130
 emulated seconds; Machine ▸ Warp Speed shortens the wait.
@@ -577,12 +577,12 @@ the boot floppy and Live CD of the 2026-11-24 nightly build:
 | --- | --- |
 | boot | by frame 4,500 AROS had its own screen; by frame 6,500 (130 s) the desktop was up: a title bar starting "Workbench", three volume icons, among them "RAM Disk" and "AROS Live CD", and the pointer in the top left corner. 5,597 blocks read from the hard disk, none written |
 | mouse moved by 60 and 30 counts | the pointer moved 60 pixels right and 30 lines down |
-| pointer moved onto the "AROS Live CD" icon, two clicks | the busy pointer appeared, and a window opened with three rows of drawer icons (1,302 more blocks read) |
+| pointer moved onto the "AROS Live CD" icon, two clicks | the pointer changed shape while the disk was read, and a window opened with three rows of drawer icons (1,302 more blocks read) |
 | right button held on the title bar, pointer pulled down | the menu bar appeared and its first menu, "Workbench", dropped down with its items |
 
 In the app, started with the same floppy and hard disk image, `-FastRAM YES`
 and `-Warp YES`, a capture of the window 45 seconds after launch showed the
-desktop. No emulator change was needed for the desktop beyond the two fixes
+desktop with its title bar and three icons. No emulator change was needed for the desktop beyond the two fixes
 below; the probe gained scripted mouse input to check it.
 
 Checked earlier the same day with the boot floppy alone:
