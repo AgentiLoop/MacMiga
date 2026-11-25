@@ -230,7 +230,73 @@ core does not have).
 
 `MacMigaCore` re-exports the two public types as `MC68000` and `CPUError`.
 
-The package carries its own tests, 74 of them, and they use no Amiga code. The
+### Single-step tests
+
+The package has a second program, `M68KSingleStep`, which runs the core against
+the 68000 set of the SingleStepTests project
+(`github.com/SingleStepTests/680x0`, folder `68000/v1`): 124 files of about
+8,065 single instructions each, 1,000,060 in all, with the registers and
+memory before and after. The files (about 190 MB) are not in this repository.
+
+```sh
+swift run -c release --package-path Packages/M68K M68KSingleStep 68000/v1
+swift run -c release --package-path Packages/M68K M68KSingleStep --show 5 68000/v1/ASR.b.json.gz
+```
+
+A test passes when all registers, SR, PC and every listed byte of memory match
+and nothing else was written. Bus cycles and the prefetch queue are not
+compared; the core models neither. `--show N` lists the first N failures of
+each file, `--address-errors` lists those among the address-error tests, and
+`--only TEXT` runs the tests whose name contains TEXT.
+
+The set was generated with a reference emulator, not measured on a 68000 (its
+README says so), so where it disagrees with Motorola's manuals it is not the
+last word. Result on November 25, 2026:
+
+| Tests | Count | Result |
+| --- | --- | --- |
+| Without an address error | 821,973 | 818,234 pass, 3,739 fail |
+| With an address error | 178,087 | 54,524 match exactly; 63,120 match except inside the exception frame; 60,443 differ elsewhere too |
+
+The 3,739 failures are these:
+
+- 3,736 are ASR by a register count larger than the operand's width, on a
+  negative operand. The set expects C and X clear; MacMiga sets them, because
+  every bit shifted out is a copy of the sign bit and the Programmer's
+  Reference Manual defines C and X as the last bit shifted out. Kept as is.
+- 2 are ASL.B tests whose expected result changes all 32 bits of the register,
+  which a byte shift cannot do.
+- 1 is the set's only division by zero, a DIVU. Its expected stacked PC is the
+  instruction's own address; MacMiga stacks the next instruction's, as it does
+  for CHK, where the set agrees. The flags of that test do match.
+
+The address-error tests that differ outside the frame do so in what the faulting
+instruction had already changed, for example An after `-(An)` in the MOVE and
+ADDX files and SR in the CMP files. Inside the frame, in the seven files I
+looked at, the stacked PC is 0 to 8 bytes past the instruction where the
+User's Manual says 2 to 10. Neither was changed: without a measurement on a
+68000 there is nothing to decide them by.
+
+Running the set found five faults, now fixed and covered by unit tests:
+
+- ABCD could stop the emulator with a Swift arithmetic trap for some operands
+  that are not valid BCD (the ABCD file ended with signal 5 before the fix),
+  and SBCD and NBCD gave different results from the set for such operands
+  (7,052 tests).
+- CHK changed N when it did not trap, and took its exception with An as it was
+  before `(An)+` or `-(An)` (1,509 tests).
+- A division by zero left N, Z, V and C as they were in the stacked SR; they are
+  now clear, as the set's one such test expects. It also keeps An as `(An)+` or
+  `-(An)` left it, which is by analogy with CHK: the set has no test of that.
+- A jump to an odd address took its address error one step late, and JSR had
+  pushed the return address by then.
+- The address-error frame held only 24 bits of the access address and none of
+  the opcode bits in its first word.
+
+Before these fixes 801,608 tests passed and 12,300 failed, with the 8,065 ABCD
+tests not run because of the trap.
+
+The package carries its own tests, 79 of them, and they use no Amiga code. The
 instruction-level tests were moved here from the MacMiga test target. Their
 checks are unchanged except in two places: the error for an address with
 nothing behind it is now the test bus's own, and the reset test puts its
@@ -255,9 +321,11 @@ NEG/NEGX/CLR/NOT/TST/TAS, AND/OR/EOR and their immediate forms (including to
 CCR/SR), BTST/BCHG/BCLR/BSET, ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR (register and
 memory), MULU/MULS/DIVU/DIVS, SWAP, EXT, EXG, MOVEM, MOVE to/from SR and CCR,
 MOVE USP, LINK/UNLK, Scc, DBcc, Bcc/BRA/BSR, RTS, RTR, RTE, TRAP, TRAPV, RESET
-(resets the devices on the bus), STOP, NOP, ABCD/SBCD/NBCD (N and V follow the undocumented
-68000 results as Musashi computes them), CHK.W (trap 6 with N set for a negative
-register; Z/V/C cleared) and MOVEP.W/.L. This completes the 68000 instruction set;
+(resets the devices on the bus), STOP, NOP, ABCD/SBCD/NBCD (for operands that are not valid BCD, and for the
+undocumented N and V, the results are those of the single-step test set; see
+"Single-step tests"), CHK.W (trap 6 with N set for a negative register and
+clear for one above the bound; Z/V/C cleared, N unchanged when it does not
+trap) and MOVEP.W/.L. This completes the 68000 instruction set;
 unassigned encodings and invalid addressing modes take the illegal-instruction
 exception (vector 4, stacked PC = the opcode's address), as on hardware. Setting
 `cpu.stopsOnIllegalInstruction = true` makes `step` throw
@@ -272,7 +340,9 @@ Compares set N, Z, V, and C and leave X unchanged; CMPA compares all 32 bits
 with a sign-extended word source. DBcc decrements only
 the low word of Dn and leaves flags unchanged.
 DIVU/DIVS overflow sets V, clears C and leaves N and Z unchanged (an assumption;
-the 68000 leaves them undefined).
+the 68000 leaves them undefined). A division by zero stacks SR with N, Z, V and
+C clear. CHK and the divisions take their exception after `(An)+` or `-(An)`
+has changed An.
 Branches support byte and word displacements. Unsupported opcodes throw an
 opcode/address diagnostic.
 
@@ -286,11 +356,14 @@ above the SR mask: SR and PC are stacked, the mask is raised and STOP ends.
 Level 7 is treated as level-sensitive (real hardware: edge-triggered).
 
 This is functional stepping, not cycle-accurate emulation. Prefetch and trace
-are absent. A word or long access to an odd address (including an opcode fetch
-after a jump to an odd target) takes the address-error exception: vector 3 with
-the 14-byte group 0 frame (access type and function code, access address,
-opcode, SR, PC). The stacked PC is the odd address for a fetch fault, otherwise
-the instruction address + 2 (hardware stacks 2–10 bytes past it). A fault while
+are absent. A word or long access to an odd address takes the address-error
+exception: vector 3 with the 14-byte group 0 frame (access type and function
+code, with the opcode's upper 11 bits above them; all 32 bits of the access
+address; opcode; SR; PC). A jump, branch or return to an odd address takes it
+in the same step, as the 68000 fetches from the target before the instruction
+ends; JSR pushes no return address in that case. The stacked PC is the odd
+address for a fetch fault, otherwise the instruction address + 2 (hardware
+stacks 2–10 bytes past it). A fault while
 writing that frame stops emulation instead of halting the CPU. Setting
 `cpu.stopsOnAddressError = true` throws `CPUError.addressError` instead, as
 the fault-preservation tests do. Unmapped addresses still stop
@@ -723,7 +796,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 The tests are in two places. `swift test` runs the 95 tests of the Amiga
 machine in `Tests/MacMigaCoreTests`. `swift test --package-path Packages/M68K`
-runs the 74 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
+runs the 79 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
 branch, logic/shift and decimal/MOVEP/CHK tests described below). Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
