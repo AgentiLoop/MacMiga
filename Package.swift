@@ -15,6 +15,7 @@ let package = Package(
         .target(name: "MacMigaCore", dependencies: ["M68K"]),
         .executableTarget(name: "MacMiga", dependencies: ["MacMigaCore"]),
         .executableTarget(name: "KickstartProbe", dependencies: ["MacMigaCore"], path: "Tools"),
+        .executableTarget(name: "MakeHardfile", dependencies: ["MacMigaCore"]),
         .testTarget(name: "MacMigaCoreTests", dependencies: ["MacMigaCore"])
     ]
 )

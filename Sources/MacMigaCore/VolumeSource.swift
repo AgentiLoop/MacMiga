@@ -1,0 +1,66 @@
+import Foundation
+
+extension VolumeEntry {
+    /// Reads a Mac folder, with everything below it, as volume entries (paths relative to
+    /// the folder, sorted by name). Only regular files and directories are taken; symbolic
+    /// links and other special files are left out, as are `.DS_Store` and `._*` files.
+    /// Dates are the modification dates as wall-clock time in `timeZone`.
+    public static func entries(ofFolder folder: URL, timeZone: TimeZone = .current) throws -> [VolumeEntry] {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        var entries: [VolumeEntry] = []
+        func visit(_ directory: URL, _ path: [String]) throws {
+            let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .contentModificationDateKey]
+            let children = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)
+                .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            for child in children {
+                let name = child.lastPathComponent.precomposedStringWithCanonicalMapping
+                guard name != ".DS_Store", !name.hasPrefix("._") else { continue }
+                let values = try child.resourceValues(forKeys: Set(keys))
+                let parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second],
+                                                    from: values.contentModificationDate ?? Date())
+                let date = AmigaDate(year: parts.year ?? 1978, month: parts.month ?? 1, day: parts.day ?? 1,
+                                     hour: parts.hour ?? 0, minute: parts.minute ?? 0, second: parts.second ?? 0)
+                if values.isDirectory == true {
+                    entries.append(VolumeEntry(path: path + [name], contents: nil, date: date))
+                    try visit(child, path + [name])
+                } else if values.isRegularFile == true {
+                    entries.append(VolumeEntry(path: path + [name], contents: Array(try Data(contentsOf: child)), date: date))
+                }
+            }
+        }
+        try visit(folder, [])
+        return entries
+    }
+}
+
+extension VolumeEntry {
+    /// The entries of a Mac folder or of an LHA archive (`.lha`, `.lzh`).
+    public static func entries(of source: URL) throws -> [VolumeEntry] {
+        var isDirectory: ObjCBool = false
+        _ = FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory)
+        return isDirectory.boolValue ? try entries(ofFolder: source) : try LHA.unpack(Array(try Data(contentsOf: source)))
+    }
+}
+
+extension FastFileSystem {
+    /// Builds a hardfile from a Mac folder or from an LHA archive. The volume is named
+    /// `name`, or after the folder or archive (characters AmigaDOS does not allow become
+    /// `_`, and the name is cut to 30 characters), and dated now. `startupSequence`, if
+    /// given, becomes the text of `S/Startup-Sequence`, replacing one from the source.
+    public static func hardfile(from source: URL, name: String? = nil, freeBytes: Int? = nil,
+                                startupSequence: String? = nil) throws -> [UInt8] {
+        var entries = try VolumeEntry.entries(of: source)
+        let base = source.pathExtension.isEmpty ? source.lastPathComponent : source.deletingPathExtension().lastPathComponent
+        let fallback = String(String.UnicodeScalarView(base.precomposedStringWithCanonicalMapping.unicodeScalars
+            .map { $0.value < 0x20 || $0.value > 0xFF || $0 == "/" || $0 == ":" ? "_" : $0 }.prefix(30)))
+        let now = Calendar(identifier: .gregorian).dateComponents([.year, .month, .day, .hour, .minute, .second], from: Date())
+        let date = AmigaDate(year: now.year ?? 1978, month: now.month ?? 1, day: now.day ?? 1,
+                             hour: now.hour ?? 0, minute: now.minute ?? 0, second: now.second ?? 0)
+        if let startupSequence {
+            entries.append(VolumeEntry(path: ["S", "Startup-Sequence"], contents: Array((startupSequence + "\n").utf8), date: date))
+        }
+        return try hardfile(named: name ?? (fallback.isEmpty ? "MacMigaHD" : fallback), entries: entries,
+                            freeBytes: freeBytes, date: date)
+    }
+}
