@@ -28,6 +28,8 @@ public struct AmigaMemory {
     /// Copper and display output (Agnus DMA, Denise), driven by `advanceChipset`.
     public var copper = Copper()
     public var video = Video()
+    /// Internal floppy drive DF0, controlled through CIA-B port B.
+    public private(set) var drive = FloppyDrive()
 
     /// ROM overlay follows CIA-A PA0 (OVL). The line is pulled up, so it is active
     /// while PA0 is still an input after reset.
@@ -44,6 +46,13 @@ public struct AmigaMemory {
         precondition(slowRAMSize >= 0 && slowRAMSize <= 0x18_0000 && slowRAMSize % 0x4_0000 == 0)
         self.kickstart = kickstart
         self.slowRAM = [UInt8](repeating: 0, count: slowRAMSize)
+        updateDrive()
+    }
+
+    /// Feeds CIA-B port B to the drive and its status back into CIA-A port A bits 2–5.
+    private mutating func updateDrive() {
+        drive.control(ciaB.outputB)
+        ciaA.inputA = (ciaA.inputA & ~0x3C) | (drive.statusLines & 0x3C)
     }
 
     /// Host convenience: drives CIA-A PA0 as an output at the requested OVL level.
@@ -59,6 +68,8 @@ public struct AmigaMemory {
         ciaB = CIA8520()
         custom = CustomChips()
         copper = Copper()
+        drive = FloppyDrive()
+        updateDrive()
         return try ResetVectors(
             supervisorStackPointer: readLong(at: 0),
             programCounter: readLong(at: 4)
@@ -150,6 +161,7 @@ public struct AmigaMemory {
                 if physical & 0x1000 == 0 { ciaA.write(register: register, value: value) }
             } else if physical & 0x2000 == 0 {
                 ciaB.write(register: register, value: value)
+                if register == 1 || register == 3 { updateDrive() }
             }
             return
         }
