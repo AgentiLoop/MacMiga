@@ -1,42 +1,51 @@
 public enum CPUError: Error, Equatable {
     case unsupportedInstruction(opcode: UInt16, address: UInt32)
+    /// A word or long access to an odd address (24-bit), thrown instead of taking the
+    /// exception when `stopsOnAddressError` is set or while an exception frame is written.
+    case addressError(address: UInt32, isWrite: Bool)
 }
 
-/// Functional MC68000 subset; no prefetch or cycle accounting.
+/// Functional MC68000; no prefetch or cycle accounting. It knows nothing about the machine
+/// around it: every memory access goes through the `M68KBus` passed to each call, and the
+/// machine presents interrupts with `interrupt(level:memory:)`.
+///
+/// The members are `@inlinable` so that a client module compiles the generic code
+/// specialized for its own bus type.
 public struct MC68000: Equatable, Sendable {
-    private var dataRegisters = [UInt32](repeating: 0, count: 8)
-    private var addressRegisters = [UInt32](repeating: 0, count: 7)
-    private var status: UInt16 = 0x2700
+    @usableFromInline var dataRegisters = [UInt32](repeating: 0, count: 8)
+    @usableFromInline var addressRegisters = [UInt32](repeating: 0, count: 7)
+    @usableFromInline var status: UInt16 = 0x2700
     public var programCounter: UInt32 = 0
     public var userStackPointer: UInt32 = 0
     public var supervisorStackPointer: UInt32 = 0
     /// Set by STOP; the CPU executes nothing until an accepted interrupt clears it.
-    public private(set) var isStopped = false
+    @inlinable public var isStopped: Bool { stopped }
+    @usableFromInline var stopped = false
     /// When false (hardware behaviour), unassigned opcodes and invalid addressing modes take the
     /// illegal-instruction exception (vector 4, stacked PC = the opcode's address). When true,
     /// `step` throws `CPUError.unsupportedInstruction` instead, for decoder diagnostics.
     public var stopsOnIllegalInstruction = false
     /// When false (hardware behaviour), a word/long access to an odd address takes the address
-    /// error exception (vector 3, 14-byte group 0 frame). When true, `step` rethrows
-    /// `MemoryBusError.unalignedAddress` instead.
+    /// error exception (vector 3, 14-byte group 0 frame). When true, `step` throws
+    /// `CPUError.addressError` instead. Either way the bus never sees the access.
     public var stopsOnAddressError = false
 
     /// Deterministic host initialization, not a claim about hardware power-on register values.
-    public init() {}
+    @inlinable public init() {}
 
     /// Host/debugger access. Only the MC68000's implemented status bits are retained.
-    public var statusRegister: UInt16 {
+    @inlinable public var statusRegister: UInt16 {
         get { status }
         set { status = newValue & 0xA71F }
     }
 
-    public subscript(data index: Int) -> UInt32 {
+    @inlinable public subscript(data index: Int) -> UInt32 {
         get { dataRegisters[index] }
         set { dataRegisters[index] = newValue }
     }
 
     /// A7 selects SSP or USP according to the status register's supervisor bit.
-    public subscript(address index: Int) -> UInt32 {
+    @inlinable public subscript(address index: Int) -> UInt32 {
         get {
             precondition((0..<8).contains(index))
             if index == 7 {
@@ -55,12 +64,14 @@ public struct MC68000: Equatable, Sendable {
         }
     }
 
-    /// External machine reset, not the RESET opcode. General registers and CCR are retained.
-    public mutating func reset(memory: inout AmigaMemory) throws {
-        let vectors = try memory.reset()
+    /// External machine reset, not the RESET opcode: loads SSP from address 0 and PC from
+    /// address 4. General registers and CCR are retained. The machine resets its own devices.
+    @inlinable public mutating func reset<Bus: M68KBus>(memory: inout Bus) throws {
+        let stackPointer = try memory.readAlignedLong(at: 0)
+        let entry = try memory.readAlignedLong(at: 4)
         status = (status & 0x001F) | 0x2700
-        supervisorStackPointer = vectors.supervisorStackPointer
-        programCounter = vectors.programCounter
+        supervisorStackPointer = stackPointer
+        programCounter = entry
     }
 
     /// Executes one supported instruction. PC is the next instruction address on success.
@@ -70,7 +81,7 @@ public struct MC68000: Equatable, Sendable {
     /// Group 1/2 exceptions (TRAP, privilege violation, divide by zero, illegal, line A/F)
     /// are processed by pushing PC and SR on the supervisor stack and jumping through the
     /// vector table. Bus/address errors and trace are not modelled yet; see `interrupt(level:memory:)`.
-    public mutating func step(memory: inout AmigaMemory) throws {
+    @inlinable public mutating func step<Bus: M68KBus>(memory: inout Bus) throws {
         guard !isStopped else { return }
         do {
             try execute(memory: &memory)
@@ -79,8 +90,8 @@ public struct MC68000: Equatable, Sendable {
             try enterException(vector: trap.vector, returnAddress: trap.returnAddress, memory: &memory)
         } catch CPUError.unsupportedInstruction(_, let address) where !stopsOnIllegalInstruction {
             try enterException(vector: 4, returnAddress: address, memory: &memory)
-        } catch MemoryBusError.unalignedAddress(let address) where !stopsOnAddressError {
-            try enterAddressError(accessAddress: address, memory: &memory)
+        } catch CPUError.addressError(let address, let isWrite) where !stopsOnAddressError {
+            try enterAddressError(accessAddress: address, write: isWrite, memory: &memory)
         }
     }
 
@@ -88,23 +99,23 @@ public struct MC68000: Equatable, Sendable {
     /// I/N bit 3 = 0, function code bits 0–2), access address (long), instruction register,
     /// SR, PC. The stacked PC is the faulting address for an odd opcode fetch, else the
     /// instruction address + 2 (real hardware stacks a value 2–10 bytes past it). A fault while
-    /// writing this frame (odd SSP) would halt a real 68000; here the bus error is rethrown.
-    private mutating func enterAddressError(accessAddress: UInt32, memory: inout AmigaMemory) throws {
-        let write = memory.unalignedAccessWasWrite
+    /// writing this frame (odd SSP) would halt a real 68000; here `CPUError.addressError` is thrown.
+    @inlinable mutating func enterAddressError<Bus: M68KBus>(accessAddress: UInt32, write: Bool,
+                                            memory: inout Bus) throws {
         let fetch = !write && accessAddress == programCounter & 0xFF_FFFF
-        let opcode = fetch ? 0 : try memory.readWord(at: programCounter)
+        let opcode = fetch ? 0 : try memory.readAlignedWord(at: programCounter)
         let supervisor: UInt16 = status & 0x2000 != 0 ? 4 : 0
         let special = (write ? 0 : 0x10) | supervisor | (fetch ? 2 : 1)
         var next = self
         next.status = (status | 0x2000) & 0x7FFF
         let stackPointer = next.supervisorStackPointer &- 14
-        try memory.writeLong(fetch ? programCounter : programCounter &+ 2, at: stackPointer &+ 10)
-        try memory.writeWord(status, at: stackPointer &+ 8)
-        try memory.writeWord(opcode, at: stackPointer &+ 6)
-        try memory.writeLong(accessAddress, at: stackPointer &+ 2)
-        try memory.writeWord(special, at: stackPointer)
+        try memory.writeAlignedLong(fetch ? programCounter : programCounter &+ 2, at: stackPointer &+ 10)
+        try memory.writeAlignedWord(status, at: stackPointer &+ 8)
+        try memory.writeAlignedWord(opcode, at: stackPointer &+ 6)
+        try memory.writeAlignedLong(accessAddress, at: stackPointer &+ 2)
+        try memory.writeAlignedWord(special, at: stackPointer)
         next.supervisorStackPointer = stackPointer
-        next.programCounter = try memory.readLong(at: 3 * 4)
+        next.programCounter = try memory.readAlignedLong(at: 3 * 4)
         self = next
     }
 
@@ -113,10 +124,10 @@ public struct MC68000: Equatable, Sendable {
     /// STOP is ended and execution continues at vector 24 + level. Returns whether accepted.
     /// Level 7 is treated as level-sensitive here; real hardware makes it edge-triggered.
     @discardableResult
-    public mutating func interrupt(level: Int, memory: inout AmigaMemory) throws -> Bool {
+    @inlinable public mutating func interrupt<Bus: M68KBus>(level: Int, memory: inout Bus) throws -> Bool {
         guard (1...7).contains(level), level == 7 || level > Int((status >> 8) & 7) else { return false }
         var next = self
-        next.isStopped = false
+        next.stopped = false
         try next.enterException(vector: 24 + level, returnAddress: programCounter, memory: &memory)
         next.status = (next.status & 0xF8FF) | UInt16(level) << 8
         self = next
@@ -125,47 +136,53 @@ public struct MC68000: Equatable, Sendable {
 
     /// Pending exception raised by an instruction; CPU state is untouched when it is thrown,
     /// except that `condition`, if given, replaces the CCR before stacking (CHK sets N).
-    private struct Trap: Error {
-        let vector: Int
-        let returnAddress: UInt32
-        var condition: UInt16? = nil
+    @usableFromInline struct Trap: Error {
+        @usableFromInline let vector: Int
+        @usableFromInline let returnAddress: UInt32
+        @usableFromInline var condition: UInt16?
+
+        @inlinable init(vector: Int, returnAddress: UInt32, condition: UInt16? = nil) {
+            self.vector = vector
+            self.returnAddress = returnAddress
+            self.condition = condition
+        }
     }
 
     /// 68000 short exception frame: SR at SSP, return PC at SSP+2. Enters supervisor, clears trace.
-    private mutating func enterException(vector: Int, returnAddress: UInt32,
-                                         memory: inout AmigaMemory) throws {
+    @inlinable mutating func enterException<Bus: M68KBus>(vector: Int, returnAddress: UInt32,
+                                         memory: inout Bus) throws {
         var next = self
         next.status = (status | 0x2000) & 0x7FFF
         let stackPointer = next.supervisorStackPointer &- 6
-        try memory.writeLong(returnAddress, at: stackPointer &+ 2)
-        try memory.writeWord(status, at: stackPointer)
+        try memory.writeAlignedLong(returnAddress, at: stackPointer &+ 2)
+        try memory.writeAlignedWord(status, at: stackPointer)
         next.supervisorStackPointer = stackPointer
-        next.programCounter = try memory.readLong(at: UInt32(vector * 4))
+        next.programCounter = try memory.readAlignedLong(at: UInt32(vector * 4))
         self = next
     }
 
-    private static func sizeMask(_ size: Int) -> UInt32 {
+    @inlinable static func sizeMask(_ size: Int) -> UInt32 {
         size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFF_FFFF
     }
 
-    private static func isDataAlterable(_ mode: Int, _ register: Int) -> Bool {
+    @inlinable static func isDataAlterable(_ mode: Int, _ register: Int) -> Bool {
         mode != 1 && (mode != 7 || register <= 1)
     }
 
-    private static func isMemoryAlterable(_ mode: Int, _ register: Int) -> Bool {
+    @inlinable static func isMemoryAlterable(_ mode: Int, _ register: Int) -> Bool {
         mode >= 2 && (mode != 7 || register <= 1)
     }
 
-    private static func isDataAddressing(_ mode: Int, _ register: Int) -> Bool {
+    @inlinable static func isDataAddressing(_ mode: Int, _ register: Int) -> Bool {
         mode != 1 && (mode != 7 || register <= 4)
     }
 
-    private static func isControl(_ mode: Int, _ register: Int) -> Bool {
+    @inlinable static func isControl(_ mode: Int, _ register: Int) -> Bool {
         mode == 2 || mode == 5 || mode == 6 || (mode == 7 && register <= 3)
     }
 
     /// N and Z from the result, V and C cleared, X unchanged.
-    private mutating func setLogicFlags(_ value: UInt32, size: Int) {
+    @inlinable mutating func setLogicFlags(_ value: UInt32, size: Int) {
         status &= 0xFFF0
         if value & Self.sizeMask(size) == 0 { status |= 0x04 }
         if value & (UInt32(1) << (size * 8 - 1)) != 0 { status |= 0x08 }
@@ -173,7 +190,7 @@ public struct MC68000: Equatable, Sendable {
 
     /// Add or subtract with XNZVC flags. With `extend`, X is added/subtracted too and Z is
     /// only cleared (never set), as for ADDX/SUBX/NEGX.
-    private mutating func addSub(_ destination: UInt32, _ source: UInt32, size: Int,
+    @inlinable mutating func addSub(_ destination: UInt32, _ source: UInt32, size: Int,
                                  subtract: Bool, extend: Bool = false) -> UInt32 {
         let mask = Self.sizeMask(size)
         let sign = UInt32(1) << (size * 8 - 1)
@@ -194,9 +211,9 @@ public struct MC68000: Equatable, Sendable {
         return result
     }
 
-    private mutating func execute(memory: inout AmigaMemory) throws {
+    @inlinable mutating func execute<Bus: M68KBus>(memory: inout Bus) throws {
         let instructionAddress = programCounter
-        let opcode = try memory.readWord(at: instructionAddress)
+        let opcode = try memory.readAlignedWord(at: instructionAddress)
         let nextWord = instructionAddress &+ 2
 
         switch opcode {
@@ -224,7 +241,7 @@ public struct MC68000: Equatable, Sendable {
             } else {
                 if opcode & 0xFFC0 == 0x4E80 { // JSR: resolve target before changing A7.
                     let stackPointer = next[address: 7] &- 4
-                    try memory.writeLong(cursor, at: stackPointer)
+                    try memory.writeAlignedLong(cursor, at: stackPointer)
                     next[address: 7] = stackPointer
                 }
                 next.programCounter = target
@@ -234,7 +251,7 @@ public struct MC68000: Equatable, Sendable {
             programCounter = nextWord
         case 0x4E75: // RTS
             let stackPointer = self[address: 7]
-            let target = try memory.readLong(at: stackPointer)
+            let target = try memory.readAlignedLong(at: stackPointer)
             self[address: 7] = stackPointer &+ 4
             programCounter = target
         case _ where opcode & 0xF100 == 0x7000: // MOVEQ #imm,Dn
@@ -251,7 +268,7 @@ public struct MC68000: Equatable, Sendable {
             let displacement: Int32
             let returnAddress: UInt32
             if shortDisplacement == 0 {
-                displacement = Int32(Int16(bitPattern: try memory.readWord(at: nextWord)))
+                displacement = Int32(Int16(bitPattern: try memory.readAlignedWord(at: nextWord)))
                 returnAddress = nextWord &+ 2
             } else {
                 // On the 68000, $FF is -1, not a 68020 long displacement marker.
@@ -261,7 +278,7 @@ public struct MC68000: Equatable, Sendable {
             let target = nextWord &+ UInt32(bitPattern: displacement)
             if condition == 1 { // BSR
                 let stackPointer = self[address: 7] &- 4
-                try memory.writeLong(returnAddress, at: stackPointer)
+                try memory.writeAlignedLong(returnAddress, at: stackPointer)
                 self[address: 7] = stackPointer
                 programCounter = target
             } else {
@@ -273,7 +290,7 @@ public struct MC68000: Equatable, Sendable {
             try next.arithmetic(opcode, memory: &memory)
             self = next
         case _ where opcode & 0xF0F8 == 0x50C8: // DBcc Dn,<label>
-            let displacement = Self.signExtendWord(try memory.readWord(at: nextWord))
+            let displacement = Self.signExtendWord(try memory.readAlignedWord(at: nextWord))
             if conditionHolds(Int((opcode >> 8) & 15)) {
                 programCounter = nextWord &+ 2
             } else {
@@ -342,7 +359,7 @@ public struct MC68000: Equatable, Sendable {
 
     /// BCD add/subtract with X for ABCD, SBCD and NBCD. C and X = decimal carry/borrow, Z cleared
     /// if the result is nonzero (else unchanged); N and V follow the 68000's undocumented results.
-    private mutating func decimal(_ destination: UInt32, _ source: UInt32, subtract: Bool) -> UInt32 {
+    @inlinable mutating func decimal(_ destination: UInt32, _ source: UInt32, subtract: Bool) -> UInt32 {
         let x: UInt32 = status & 0x10 != 0 ? 1 : 0
         var result: UInt32
         var overflow: UInt32
@@ -375,7 +392,7 @@ public struct MC68000: Equatable, Sendable {
     }
 
     /// ORI/ANDI/SUBI/ADDI/EORI (including to CCR/SR) and BTST/BCHG/BCLR/BSET.
-    private mutating func immediateOrBit(_ opcode: UInt16, memory: inout AmigaMemory) throws {
+    @inlinable mutating func immediateOrBit<Bus: M68KBus>(_ opcode: UInt16, memory: inout Bus) throws {
         let instructionAddress = programCounter
         let unsupported = CPUError.unsupportedInstruction(opcode: opcode, address: instructionAddress)
         let mode = Int((opcode >> 3) & 7), register = Int(opcode & 7)
@@ -460,7 +477,7 @@ public struct MC68000: Equatable, Sendable {
     }
 
     /// Group $4 instructions other than LEA/JMP/JSR/NOP/RTS (handled in `execute`).
-    private mutating func miscellaneous(_ opcode: UInt16, memory: inout AmigaMemory) throws {
+    @inlinable mutating func miscellaneous<Bus: M68KBus>(_ opcode: UInt16, memory: inout Bus) throws {
         let instructionAddress = programCounter
         let unsupported = CPUError.unsupportedInstruction(opcode: opcode, address: instructionAddress)
         let privilege = Trap(vector: 8, returnAddress: instructionAddress)
@@ -476,12 +493,12 @@ public struct MC68000: Equatable, Sendable {
         case 0x4E72: // STOP #imm: load SR and wait for an interrupt.
             guard supervisor else { throw privilege }
             statusRegister = try extensionWord(cursor: &cursor, memory: &memory)
-            isStopped = true
+            stopped = true
         case 0x4E73: // RTE
             guard supervisor else { throw privilege }
             let stackPointer = supervisorStackPointer
-            let savedStatus = try memory.readWord(at: stackPointer)
-            let target = try memory.readLong(at: stackPointer &+ 2)
+            let savedStatus = try memory.readAlignedWord(at: stackPointer)
+            let target = try memory.readAlignedLong(at: stackPointer &+ 2)
             supervisorStackPointer = stackPointer &+ 6
             statusRegister = savedStatus
             programCounter = target
@@ -490,8 +507,8 @@ public struct MC68000: Equatable, Sendable {
             if status & 0x02 != 0 { throw Trap(vector: 7, returnAddress: cursor) }
         case 0x4E77: // RTR
             let stackPointer = self[address: 7]
-            let condition = try memory.readWord(at: stackPointer)
-            let target = try memory.readLong(at: stackPointer &+ 2)
+            let condition = try memory.readAlignedWord(at: stackPointer)
+            let target = try memory.readAlignedLong(at: stackPointer &+ 2)
             self[address: 7] = stackPointer &+ 6
             status = (status & 0xFF00) | (condition & 0x1F)
             programCounter = target
@@ -514,13 +531,13 @@ public struct MC68000: Equatable, Sendable {
         case 0x4E50...0x4E57: // LINK An,#d16
             let displacement = Self.signExtendWord(try extensionWord(cursor: &cursor, memory: &memory))
             let stackPointer = self[address: 7] &- 4
-            try memory.writeLong(register == 7 ? stackPointer : self[address: register], at: stackPointer)
+            try memory.writeAlignedLong(register == 7 ? stackPointer : self[address: register], at: stackPointer)
             self[address: 7] = stackPointer
             self[address: register] = stackPointer
             self[address: 7] = stackPointer &+ displacement
         case 0x4E58...0x4E5F: // UNLK An
             let base = self[address: register]
-            let value = try memory.readLong(at: base)
+            let value = try memory.readAlignedLong(at: base)
             self[address: 7] = base &+ 4
             self[address: register] = value
         case 0x4E60...0x4E6F: // MOVE An,USP / MOVE USP,An
@@ -533,7 +550,7 @@ public struct MC68000: Equatable, Sendable {
                 mode: mode, register: register, size: 4, cursor: &cursor, memory: &memory
             ) else { throw unsupported }
             let stackPointer = self[address: 7] &- 4
-            try memory.writeLong(address, at: stackPointer)
+            try memory.writeAlignedLong(address, at: stackPointer)
             self[address: 7] = stackPointer
         case _ where opcode & 0xFFC0 == 0x4800: // NBCD <ea>
             guard Self.isDataAlterable(mode, register) else { throw unsupported }
@@ -597,8 +614,8 @@ public struct MC68000: Equatable, Sendable {
 
     /// MOVEM: register list to memory (control or predecrement) or memory to registers
     /// (control or postincrement). Words loaded into registers are sign-extended.
-    private mutating func moveMultiple(_ opcode: UInt16, cursor: inout UInt32,
-                                       memory: inout AmigaMemory) throws {
+    @inlinable mutating func moveMultiple<Bus: M68KBus>(_ opcode: UInt16, cursor: inout UInt32,
+                                       memory: inout Bus) throws {
         let mode = Int((opcode >> 3) & 7), register = Int(opcode & 7)
         let toRegisters = opcode & 0x0400 != 0
         let size: UInt32 = opcode & 0x0040 != 0 ? 4 : 2
@@ -615,8 +632,8 @@ public struct MC68000: Equatable, Sendable {
                 let index = 15 - bit
                 let value = index < 8 ? self[data: index] : self[address: index - 8]
                 address &-= size
-                if size == 4 { try memory.writeLong(value, at: address) }
-                else { try memory.writeWord(UInt16(truncatingIfNeeded: value), at: address) }
+                if size == 4 { try memory.writeAlignedLong(value, at: address) }
+                else { try memory.writeAlignedWord(UInt16(truncatingIfNeeded: value), at: address) }
             }
             self[address: register] = address
             return
@@ -633,13 +650,13 @@ public struct MC68000: Equatable, Sendable {
         for index in 0..<16 where list & (1 << index) != 0 {
             if toRegisters {
                 let value = size == 4
-                    ? try memory.readLong(at: address)
-                    : Self.signExtendWord(try memory.readWord(at: address))
+                    ? try memory.readAlignedLong(at: address)
+                    : Self.signExtendWord(try memory.readAlignedWord(at: address))
                 if index < 8 { self[data: index] = value } else { self[address: index - 8] = value }
             } else {
                 let value = index < 8 ? self[data: index] : self[address: index - 8]
-                if size == 4 { try memory.writeLong(value, at: address) }
-                else { try memory.writeWord(UInt16(truncatingIfNeeded: value), at: address) }
+                if size == 4 { try memory.writeAlignedLong(value, at: address) }
+                else { try memory.writeAlignedWord(UInt16(truncatingIfNeeded: value), at: address) }
             }
             address &+= size
         }
@@ -647,7 +664,7 @@ public struct MC68000: Equatable, Sendable {
     }
 
     /// OR ($8), EOR/CMPM ($B, opmodes 4–6), AND ($C), MULU/MULS, DIVU/DIVS and EXG.
-    private mutating func logical(_ opcode: UInt16, memory: inout AmigaMemory) throws {
+    @inlinable mutating func logical<Bus: M68KBus>(_ opcode: UInt16, memory: inout Bus) throws {
         let unsupported = CPUError.unsupportedInstruction(opcode: opcode, address: programCounter)
         let mode = Int((opcode >> 3) & 7), register = Int(opcode & 7)
         let upper = Int((opcode >> 9) & 7)
@@ -738,7 +755,7 @@ public struct MC68000: Equatable, Sendable {
     }
 
     /// ASL/ASR, LSL/LSR, ROXL/ROXR, ROL/ROR on Dn (count 1–8 or Dn mod 64) and on memory words.
-    private mutating func shift(_ opcode: UInt16, memory: inout AmigaMemory) throws {
+    @inlinable mutating func shift<Bus: M68KBus>(_ opcode: UInt16, memory: inout Bus) throws {
         var cursor = programCounter &+ 2
         let left = opcode & 0x0100 != 0
         let sizeBits = Int((opcode >> 6) & 3)
@@ -793,12 +810,12 @@ public struct MC68000: Equatable, Sendable {
         programCounter = cursor
     }
 
-    private enum MoveOperand {
+    @usableFromInline enum MoveOperand {
         case data(Int), address(Int), memory(UInt32), immediate(UInt32)
     }
 
     /// CMP <ea>,Dn; CMPA <ea>,An; CMPI #imm,<ea>. Sets NZVC from destination - source; X is unchanged.
-    private mutating func compare(_ opcode: UInt16, memory: inout AmigaMemory) throws {
+    @inlinable mutating func compare<Bus: M68KBus>(_ opcode: UInt16, memory: inout Bus) throws {
         let mode = Int((opcode >> 3) & 7)
         let register = Int(opcode & 7)
         let immediateForm = opcode & 0xF000 == 0x0000
@@ -851,7 +868,7 @@ public struct MC68000: Equatable, Sendable {
     }
 
     /// ADD, ADDA, ADDQ, SUB, SUBA, SUBQ, ADDX and SUBX.
-    private mutating func arithmetic(_ opcode: UInt16, memory: inout AmigaMemory) throws {
+    @inlinable mutating func arithmetic<Bus: M68KBus>(_ opcode: UInt16, memory: inout Bus) throws {
         let mode = Int((opcode >> 3) & 7)
         let register = Int(opcode & 7)
         let upper = Int((opcode >> 9) & 7)
@@ -933,7 +950,7 @@ public struct MC68000: Equatable, Sendable {
         programCounter = cursor
     }
 
-    private func read(_ operand: MoveOperand, size: Int, memory: inout AmigaMemory) throws -> UInt32 {
+    @inlinable func read<Bus: M68KBus>(_ operand: MoveOperand, size: Int, memory: inout Bus) throws -> UInt32 {
         let mask: UInt32 = size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFF_FFFF
         switch operand {
         case .data(let register): return self[data: register] & mask
@@ -942,14 +959,14 @@ public struct MC68000: Equatable, Sendable {
         case .memory(let address):
             switch size {
             case 1: return UInt32(try memory.readByte(at: address))
-            case 2: return UInt32(try memory.readWord(at: address))
-            default: return try memory.readLong(at: address)
+            case 2: return UInt32(try memory.readAlignedWord(at: address))
+            default: return try memory.readAlignedLong(at: address)
             }
         }
     }
 
-    private mutating func write(_ value: UInt32, to operand: MoveOperand, size: Int,
-                                memory: inout AmigaMemory) throws {
+    @inlinable mutating func write<Bus: M68KBus>(_ value: UInt32, to operand: MoveOperand, size: Int,
+                                memory: inout Bus) throws {
         let mask: UInt32 = size == 1 ? 0xFF : size == 2 ? 0xFFFF : 0xFFFF_FFFF
         switch operand {
         case .data(let register): self[data: register] = (self[data: register] & ~mask) | value
@@ -957,14 +974,14 @@ public struct MC68000: Equatable, Sendable {
         case .memory(let address):
             switch size {
             case 1: try memory.writeByte(UInt8(value), at: address)
-            case 2: try memory.writeWord(UInt16(value), at: address)
-            default: try memory.writeLong(value, at: address)
+            case 2: try memory.writeAlignedWord(UInt16(value), at: address)
+            default: try memory.writeAlignedLong(value, at: address)
             }
         case .immediate: preconditionFailure("Immediate operands are not writable")
         }
     }
 
-    private mutating func move(_ opcode: UInt16, memory: inout AmigaMemory) throws {
+    @inlinable mutating func move<Bus: M68KBus>(_ opcode: UInt16, memory: inout Bus) throws {
         let size = opcode >> 12 == 1 ? 1 : opcode >> 12 == 3 ? 2 : 4
         let sourceMode = Int((opcode >> 3) & 7)
         let sourceRegister = Int(opcode & 7)
@@ -988,8 +1005,8 @@ public struct MC68000: Equatable, Sendable {
         case .memory(let address):
             switch size {
             case 1: value = UInt32(try memory.readByte(at: address))
-            case 2: value = UInt32(try memory.readWord(at: address))
-            default: value = try memory.readLong(at: address)
+            case 2: value = UInt32(try memory.readAlignedWord(at: address))
+            default: value = try memory.readAlignedLong(at: address)
             }
         }
 
@@ -1004,8 +1021,8 @@ public struct MC68000: Equatable, Sendable {
         case .memory(let address):
             switch size {
             case 1: try memory.writeByte(UInt8(value), at: address)
-            case 2: try memory.writeWord(UInt16(value), at: address)
-            default: try memory.writeLong(value, at: address)
+            case 2: try memory.writeAlignedWord(UInt16(value), at: address)
+            default: try memory.writeAlignedLong(value, at: address)
             }
         case .immediate:
             preconditionFailure("MOVE destination was validated before decoding")
@@ -1018,18 +1035,18 @@ public struct MC68000: Equatable, Sendable {
         programCounter = cursor
     }
 
-    private static func signExtendWord(_ word: UInt16) -> UInt32 {
+    @inlinable static func signExtendWord(_ word: UInt16) -> UInt32 {
         UInt32(bitPattern: Int32(Int16(bitPattern: word)))
     }
 
-    private func extensionWord(cursor: inout UInt32, memory: inout AmigaMemory) throws -> UInt16 {
-        let word = try memory.readWord(at: cursor)
+    @inlinable func extensionWord<Bus: M68KBus>(cursor: inout UInt32, memory: inout Bus) throws -> UInt16 {
+        let word = try memory.readAlignedWord(at: cursor)
         cursor &+= 2
         return word
     }
 
-    private func indexedAddress(base: UInt32, cursor: inout UInt32,
-                                memory: inout AmigaMemory) throws -> UInt32 {
+    @inlinable func indexedAddress<Bus: M68KBus>(base: UInt32, cursor: inout UInt32,
+                                memory: inout Bus) throws -> UInt32 {
         let word = try extensionWord(cursor: &cursor, memory: &memory)
         let register = Int((word >> 12) & 7)
         var index = word & 0x8000 == 0 ? self[data: register] : self[address: register]
@@ -1040,8 +1057,8 @@ public struct MC68000: Equatable, Sendable {
     }
 
     /// Called only after MOVE's source and destination mode legality has been checked.
-    private mutating func moveOperand(mode: Int, register: Int, size: Int,
-                                      cursor: inout UInt32, memory: inout AmigaMemory) throws -> MoveOperand {
+    @inlinable mutating func moveOperand<Bus: M68KBus>(mode: Int, register: Int, size: Int,
+                                      cursor: inout UInt32, memory: inout Bus) throws -> MoveOperand {
         let increment = UInt32(size == 1 && register == 7 ? 2 : size)
         switch mode {
         case 0: return .data(register)
@@ -1085,7 +1102,7 @@ public struct MC68000: Equatable, Sendable {
         }
     }
 
-    private func conditionHolds(_ condition: Int) -> Bool {
+    @inlinable func conditionHolds(_ condition: Int) -> Bool {
         let carry = status & 1 != 0
         let overflow = status & 2 != 0
         let zero = status & 4 != 0

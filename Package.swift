@@ -8,9 +8,13 @@ let package = Package(
         .library(name: "MacMigaCore", targets: ["MacMigaCore"]),
         .executable(name: "MacMiga", targets: ["MacMiga"])
     ],
+    dependencies: [
+        .package(path: "Packages/M68K")
+    ],
     targets: [
-        .target(name: "MacMigaCore"),
+        .target(name: "MacMigaCore", dependencies: ["M68K"]),
         .executableTarget(name: "MacMiga", dependencies: ["MacMigaCore"]),
+        .executableTarget(name: "KickstartProbe", dependencies: ["MacMigaCore"], path: "Tools"),
         .testTarget(name: "MacMigaCoreTests", dependencies: ["MacMigaCore"])
     ]
 )

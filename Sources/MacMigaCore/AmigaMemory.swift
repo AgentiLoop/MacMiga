@@ -1,3 +1,5 @@
+import M68K
+
 public enum MemoryBusError: Error, Equatable {
     case invalidROMSize(Int)
     case unmappedAddress(UInt32)
@@ -10,7 +12,8 @@ public struct ResetVectors: Equatable, Sendable {
 }
 
 /// CPU-side memory map subset with both CIAs. Custom chips and bus timing are not implemented.
-public struct AmigaMemory {
+/// This is the bus the 68000 core (`M68K` package) runs on.
+public struct AmigaMemory: M68KBus {
     public static let chipRAMSize = 512 * 1024
     private static let addressMask: UInt32 = 0x00FF_FFFF
     /// Gary routes `$000000`–`$1FFFFF` to Agnus; 512 KiB of chip RAM repeats through it.
@@ -32,9 +35,6 @@ public struct AmigaMemory {
     public internal(set) var drive = FloppyDrive()
     /// Paula's four audio channels and the mixed host sample stream, driven by `advanceChipset`.
     public var audio = Paula()
-    /// Whether the most recent `unalignedAddress` error came from a write (for the
-    /// 68000 address-error frame's R/W bit).
-    public internal(set) var unalignedAccessWasWrite = false
     /// When true (the default, for bus diagnostics), byte accesses to addresses with nothing
     /// behind them throw `MemoryBusError.unmappedAddress`. When false (hardware behaviour,
     /// set by `AmigaMachine`), such reads return 0 and writes are ignored; the A500 has no
@@ -246,7 +246,7 @@ public struct AmigaMemory {
     }
 
     public mutating func readWord(at address: UInt32) throws -> UInt16 {
-        try checkAlignment(address, write: false)
+        try checkAlignment(address)
         let physical = address & Self.addressMask
         if isCustomRange(physical) { return custom.readWord(offset: Int(physical & 0x1FE)) }
         let high = try readByte(at: address)
@@ -261,7 +261,7 @@ public struct AmigaMemory {
     }
 
     public mutating func writeWord(_ value: UInt16, at address: UInt32) throws {
-        try checkAlignment(address, write: true)
+        try checkAlignment(address)
         let physical = address & Self.addressMask
         if isCustomRange(physical) {
             custom.writeWord(offset: Int(physical & 0x1FE), value: value)
@@ -272,15 +272,12 @@ public struct AmigaMemory {
     }
 
     public mutating func writeLong(_ value: UInt32, at address: UInt32) throws {
-        try checkAlignment(address, write: true)
+        try checkAlignment(address)
         try writeWord(UInt16(truncatingIfNeeded: value >> 16), at: address)
         try writeWord(UInt16(truncatingIfNeeded: value), at: address &+ 2)
     }
 
-    private mutating func checkAlignment(_ address: UInt32, write: Bool) throws {
-        guard address & 1 == 0 else {
-            unalignedAccessWasWrite = write
-            throw MemoryBusError.unalignedAddress(address & Self.addressMask)
-        }
+    private func checkAlignment(_ address: UInt32) throws {
+        guard address & 1 == 0 else { throw MemoryBusError.unalignedAddress(address & Self.addressMask) }
     }
 }

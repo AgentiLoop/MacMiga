@@ -1,5 +1,6 @@
 import Foundation
 import ImageIO
+import MacMigaCore
 import UniformTypeIdentifiers
 
 /// Standalone diagnostic compiled alongside MacMigaCore, not a boot compatibility test.

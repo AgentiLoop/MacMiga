@@ -1,3 +1,9 @@
+import M68K
+
+/// The 68000 core lives in the machine-independent `M68K` package.
+public typealias MC68000 = M68K.MC68000
+public typealias CPUError = M68K.CPUError
+
 /// An A500 (PAL) assembled from the CPU and the memory bus, stepped one instruction at a time.
 ///
 /// Each instruction is charged a fixed estimate of CPU clocks (no cycle-accurate timing yet).
@@ -28,6 +34,7 @@ public struct AmigaMachine {
         memory = try AmigaMemory(kickstart: kickstart, slowRAMSize: slowRAMSize, fastRAMSize: fastRAMSize,
                                  hardDisk: hardDisk)
         memory.stopsOnUnmappedAccess = false
+        _ = try memory.reset()
         try cpu.reset(memory: &memory)
     }
 

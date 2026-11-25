@@ -245,7 +245,7 @@ private func moveMemory(_ words: [UInt16]) throws -> AmigaMemory {
         cpu.stopsOnAddressError = true
         cpu[address: 1] = destination
         let before = cpu
-        #expect(throws: MemoryBusError.self) { try cpu.step(memory: &memory) }
+        #expect(throws: (any Error).self) { try cpu.step(memory: &memory) }
         #expect(cpu == before)
     }
     var memory = try moveMemory([])

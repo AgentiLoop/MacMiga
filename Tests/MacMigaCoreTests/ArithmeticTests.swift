@@ -227,7 +227,7 @@ private func referenceFlags(_ destination: UInt32, _ source: UInt32, size: Int, 
     cpu.stopsOnAddressError = true
     cpu[address: 0] = 0x301
     let before = cpu
-    #expect(throws: MemoryBusError.unalignedAddress(0x301)) { try cpu.step(memory: &memory) }
+    #expect(throws: CPUError.addressError(address: 0x301, isWrite: false)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
 }
 

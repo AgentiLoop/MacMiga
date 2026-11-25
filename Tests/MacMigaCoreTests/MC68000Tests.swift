@@ -21,6 +21,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
     cpu[data: 3] = 0x1234_5678
     cpu[address: 2] = 0x8765_4321
     cpu.userStackPointer = 0x1000
+    _ = try memory.reset() // the machine resets its devices (overlay back on), then the CPU
     try cpu.reset(memory: &memory)
     #expect(cpu.statusRegister == 0x2715)
     #expect(cpu.programCounter == 0xFC_0008)
@@ -197,7 +198,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
     for address: UInt32 in [0x101, 0x200000] {
         cpu.programCounter = address
         let before = cpu
-        #expect(throws: MemoryBusError.self) { try cpu.step(memory: &memory) }
+        #expect(throws: (any Error).self) { try cpu.step(memory: &memory) }
         #expect(cpu == before)
     }
     // Untaken BNE.W still needs its extension word.
@@ -212,7 +213,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
         cpu.programCounter = pc
         cpu[address: 7] = sp
         before = cpu
-        #expect(throws: MemoryBusError.self) { try cpu.step(memory: &memory) }
+        #expect(throws: (any Error).self) { try cpu.step(memory: &memory) }
         #expect(cpu == before)
     }
     try memory.writeWord(0x60FF, at: 0x100)
@@ -220,6 +221,6 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
     try cpu.step(memory: &memory)
     #expect(cpu.programCounter == 0x101)
     before = cpu
-    #expect(throws: MemoryBusError.unalignedAddress(0x101)) { try cpu.step(memory: &memory) }
+    #expect(throws: CPUError.addressError(address: 0x101, isWrite: false)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
 }

@@ -153,43 +153,41 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
 }
 
 @Test func jsrStackFaultsAndPartialWrites() throws {
-    let cases: [(stack: UInt32, error: MemoryBusError)] = [
-        (0x403, .unalignedAddress(0x3FF)),
-        (0x200004, .unmappedAddress(0x200000)),
-        (0x200002, .unmappedAddress(0x200000))
-    ]
-    for item in cases {
+    func check<E: Error & Equatable>(stack: UInt32, _ error: E) throws {
         var memory = try controlMemory([0x4EB9, 0, 0x300])
         try memory.writeWord(0xFFFF, at: 0x1FFFFE)
         var cpu = MC68000()
         cpu.programCounter = 0xAB000100
         cpu.stopsOnAddressError = true
-        cpu[address: 7] = item.stack
+        cpu[address: 7] = stack
         let before = cpu
-        #expect(throws: item.error) { try cpu.step(memory: &memory) }
+        #expect(throws: error) { try cpu.step(memory: &memory) }
         #expect(cpu == before)
-        #expect(try memory.readWord(at: 0x1FFFFE) == (item.stack == 0x200002 ? 0xAB00 : 0xFFFF))
+        #expect(try memory.readWord(at: 0x1FFFFE) == (stack == 0x200002 ? 0xAB00 : 0xFFFF))
     }
+    try check(stack: 0x403, CPUError.addressError(address: 0x3FF, isWrite: true))
+    try check(stack: 0x200004, MemoryBusError.unmappedAddress(0x200000))
+    try check(stack: 0x200002, MemoryBusError.unmappedAddress(0x200000))
 }
 
 @Test func jumpTargetFaultsOccurOnNextFetch() throws {
+    func check<E: Error & Equatable>(_ opcode: UInt16, target: UInt32, _ error: E) throws {
+        var memory = try controlMemory([opcode, UInt16(target >> 16), UInt16(truncatingIfNeeded: target)])
+        var cpu = MC68000()
+        cpu.programCounter = 0x100
+        cpu.stopsOnAddressError = true
+        cpu[address: 7] = 0x400
+        try cpu.step(memory: &memory)
+        #expect(cpu.programCounter == target)
+        #expect(cpu[address: 7] == (opcode == 0x4EB9 ? 0x3FC : 0x400))
+        if opcode == 0x4EB9 { #expect(try memory.readLong(at: 0x3FC) == 0x106) }
+        let before = cpu
+        #expect(throws: error) { try cpu.step(memory: &memory) }
+        #expect(cpu == before)
+    }
     for opcode: UInt16 in [0x4EF9, 0x4EB9] {
-        for (target, error): (UInt32, MemoryBusError) in [
-            (0x301, .unalignedAddress(0x301)), (0x200000, .unmappedAddress(0x200000))
-        ] {
-            var memory = try controlMemory([opcode, UInt16(target >> 16), UInt16(truncatingIfNeeded: target)])
-            var cpu = MC68000()
-            cpu.programCounter = 0x100
-            cpu.stopsOnAddressError = true
-            cpu[address: 7] = 0x400
-            try cpu.step(memory: &memory)
-            #expect(cpu.programCounter == target)
-            #expect(cpu[address: 7] == (opcode == 0x4EB9 ? 0x3FC : 0x400))
-            if opcode == 0x4EB9 { #expect(try memory.readLong(at: 0x3FC) == 0x106) }
-            let before = cpu
-            #expect(throws: error) { try cpu.step(memory: &memory) }
-            #expect(cpu == before)
-        }
+        try check(opcode, target: 0x301, CPUError.addressError(address: 0x301, isWrite: false))
+        try check(opcode, target: 0x200000, MemoryBusError.unmappedAddress(0x200000))
     }
 }
 
