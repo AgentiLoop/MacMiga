@@ -204,7 +204,8 @@ let amigaKeys: [UInt16: UInt8] = [
 
 final class DisplayView: NSView {
     var emulator: Emulator?
-    var image: CGImage?
+    /// Pixels of the frame on screen, kept to tell whether the next frame differs.
+    private var shownPixels = Data()
     private var left = false, right = false
     private var modifiersDown = Set<UInt16>()
 
@@ -261,28 +262,33 @@ final class DisplayView: NSView {
                                        owner: self))
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        guard let context = NSGraphicsContext.current?.cgContext else { return }
-        context.setFillColor(.black)
-        context.fill(bounds)
-        guard let image else { return }
-        context.interpolationQuality = .none
-        context.saveGState()
-        context.translateBy(x: 0, y: bounds.height)
-        context.scaleBy(x: 1, y: -1)
-        context.draw(image, in: bounds)
-        context.restoreGState()
+    // The frame is the contents of the view's layer, which the window server scales with
+    // nearest-neighbour sampling; nothing is drawn through Core Graphics at window size.
+    override func makeBackingLayer() -> CALayer {
+        let layer = CALayer()
+        layer.backgroundColor = .black
+        layer.contentsGravity = .resize
+        layer.magnificationFilter = .nearest
+        layer.minificationFilter = .nearest
+        layerContentsRedrawPolicy = .never
+        return layer
     }
 
+    /// Shows the frame unless it is the one already on screen, which costs no redraw at all.
     func show(_ video: Video) {
-        let data = video.pixels.withUnsafeBufferPointer { Data(buffer: $0) }
-        guard let provider = CGDataProvider(data: data as CFData) else { return }
-        image = CGImage(width: Video.width, height: Video.height, bitsPerComponent: 8, bitsPerPixel: 32,
-                        bytesPerRow: Video.width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
-                                                 | CGBitmapInfo.byteOrder32Little.rawValue),
-                        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
-        needsDisplay = true
+        let unchanged = video.pixels.withUnsafeBytes { new in
+            shownPixels.withUnsafeBytes { old in
+                old.count == new.count && memcmp(old.baseAddress, new.baseAddress, new.count) == 0
+            }
+        }
+        guard !unchanged else { return }
+        shownPixels = video.pixels.withUnsafeBufferPointer { Data(buffer: $0) }
+        guard let provider = CGDataProvider(data: shownPixels as CFData) else { return }
+        layer?.contents = CGImage(width: Video.width, height: Video.height, bitsPerComponent: 8, bitsPerPixel: 32,
+                                  bytesPerRow: Video.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
+                                                           | CGBitmapInfo.byteOrder32Little.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -377,6 +383,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         buildMenu()
         window = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
+        view.wantsLayer = true
         window.contentView = view
         window.contentAspectRatio = view.frame.size
         window.center()
