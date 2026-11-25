@@ -102,7 +102,11 @@ NEG/NEGX/CLR/NOT/TST/TAS, AND/OR/EOR and their immediate forms (including to
 CCR/SR), BTST/BCHG/BCLR/BSET, ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR (register and
 memory), MULU/MULS/DIVU/DIVS, SWAP, EXT, EXG, MOVEM, MOVE to/from SR and CCR,
 MOVE USP, LINK/UNLK, Scc, DBcc, Bcc/BRA/BSR, RTS, RTR, RTE, TRAP, TRAPV, RESET
-(no device reset), STOP and NOP. Not implemented: ABCD/SBCD/NBCD, CHK, MOVEP.
+(no device reset), STOP, NOP, ABCD/SBCD/NBCD (N and V follow the undocumented
+68000 results as Musashi computes them), CHK.W (trap 6 with N set for a negative
+register; Z/V/C cleared) and MOVEP.W/.L. This completes the 68000 instruction set;
+unassigned encodings still stop emulation with `CPUError.unsupportedInstruction`
+rather than taking the illegal-instruction exception.
 MOVE supports register direct,
 indirect, postincrement, predecrement, displacement, brief indexed, absolute,
 PC-relative source, and immediate source addressing. LEA, JMP, and JSR accept
@@ -284,7 +288,7 @@ validate ROM identity, checksum, or software compatibility.
 
 1. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
    what breaks.
-2. Remaining CPU pieces: ABCD/SBCD/NBCD, CHK, MOVEP, bus/address errors, timing.
+2. Remaining CPU pieces: bus/address errors, instruction timing.
 3. OCS custom chips: DMA slot timing, audio modulation and filter.
 4. Disk writes, extra drives, index pulses and accurate disk timing.
 5. Native macOS display/audio interface and user-selected firmware/media.
