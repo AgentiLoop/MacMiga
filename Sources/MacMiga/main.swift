@@ -13,11 +13,17 @@ final class Emulator {
     private(set) var romURL: URL?
     private(set) var diskURL: URL?
     private var disk: [UInt8]?
+    /// Hard disk image on the controller board (DH0); changed blocks are saved back to its file.
+    private(set) var hardDisk: HardDisk?
+    private(set) var hardDiskURL: URL?
+    /// 8 MiB of Zorro II fast RAM, off by default (the stock machine is 512 KiB chip + 512 KiB slow).
+    private(set) var fastRAM = UserDefaults.standard.bool(forKey: "FastRAM")
     var onError: ((String) -> Void)?
     let audio = AudioOutput()
 
     func load(rom url: URL) throws {
-        var machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)))
+        var machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)),
+                                       fastRAMSize: fastRAM ? 8 << 20 : 0, hardDisk: hardDisk)
         if let audio { machine.memory.audio.sampleRate = audio.sampleRate }
         self.machine = machine
         romURL = url
@@ -42,6 +48,45 @@ final class Emulator {
         diskURL = nil
     }
 
+    /// Attaches a hardfile as DH0 (nil detaches) and restarts the machine, since Kickstart
+    /// only looks for expansion boards while it starts. A file that cannot be written is
+    /// attached write-protected.
+    func attach(hardDisk url: URL?) throws {
+        saveHardDisk()
+        if let url {
+            let writable = FileManager.default.isWritableFile(atPath: url.path)
+            hardDisk = try HardDisk(image: Array(try Data(contentsOf: url)), writeProtected: !writable)
+        } else {
+            hardDisk = nil
+        }
+        hardDiskURL = url
+        try reset()
+    }
+
+    func setFastRAM(_ enabled: Bool) throws {
+        fastRAM = enabled
+        UserDefaults.standard.set(enabled, forKey: "FastRAM")
+        try reset()
+    }
+
+    /// Writes the blocks the Amiga changed since the last call back into the image file.
+    func saveHardDisk() {
+        guard let hardDisk, let hardDiskURL else { return }
+        let blocks = hardDisk.takeModifiedBlocks()
+        guard !blocks.isEmpty else { return }
+        do {
+            let handle = try FileHandle(forWritingTo: hardDiskURL)
+            defer { try? handle.close() }
+            for block in blocks {
+                let start = block * HardDisk.blockSize
+                try handle.seek(toOffset: UInt64(start))
+                try handle.write(contentsOf: Data(hardDisk.bytes[start..<start + HardDisk.blockSize]))
+            }
+        } catch {
+            onError?("Could not save \(hardDiskURL.lastPathComponent): \(error)")
+        }
+    }
+
     /// Runs until the chipset completes one more frame (bounded so a bug cannot hang the UI).
     func runFrame() {
         guard var machine else { return }
@@ -54,6 +99,7 @@ final class Emulator {
             }
             audio?.queue.push(machine.memory.audio.drainSamples())
             self.machine = machine
+            if machine.memory.video.frameCount % 50 == 0 { saveHardDisk() }
         } catch {
             self.machine = nil
             onError?(String(format: "Emulation stopped at PC=$%08X: %@", machine.cpu.programCounter, "\(error)"))
@@ -337,12 +383,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observeControllers()
 
         let arguments = Array(CommandLine.arguments.dropFirst())
-        let romPath = arguments.first { !$0.lowercased().hasSuffix(".adf") }
+        let isMedia = { (path: String) in path.lowercased().hasSuffix(".adf") || path.lowercased().hasSuffix(".hdf") }
+        let romPath = arguments.first { !isMedia($0) }
             ?? UserDefaults.standard.string(forKey: "kickstartPath")
             ?? ["Kickstart ROMs/kickstart-1.3.rom"].first { FileManager.default.fileExists(atPath: $0) }
         if let romPath { open(rom: URL(fileURLWithPath: romPath)) } else { chooseROM() }
         if let adf = arguments.first(where: { $0.lowercased().hasSuffix(".adf") }) {
             insert(adf: URL(fileURLWithPath: adf))
+        }
+        if let hdf = arguments.first(where: { $0.lowercased().hasSuffix(".hdf") }) {
+            attach(hardDisk: URL(fileURLWithPath: hdf))
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 50.0, repeats: true) { _ in
             MainActor.assumeIsolated { self.tick() }
@@ -350,6 +400,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationWillTerminate(_ notification: Notification) { emulator.saveHardDisk() }
 
     private func tick() {
         emulator.runFrame()
@@ -359,8 +411,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateTitle() {
         let rom = emulator.romURL?.lastPathComponent ?? "no Kickstart"
         let disk = emulator.diskURL?.lastPathComponent ?? "empty"
+        let hardDisk = emulator.hardDiskURL.map { " — DH0: \($0.lastPathComponent)" } ?? ""
         let hint = view.mouseCaptured ? " — ⌘ releases the mouse" : ""
-        window.title = "MacMiga — \(rom) — DF0: \(disk)\(hint)"
+        window.title = "MacMiga — \(rom) — DF0: \(disk)\(hardDisk)\(hint)"
     }
 
     /// Game controllers report changes on the main queue; connect/disconnect refreshes port 2.
@@ -408,6 +461,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateTitle()
     }
 
+    private func attach(hardDisk url: URL?) {
+        do { try emulator.attach(hardDisk: url) } catch {
+            alert("Could not attach \(url?.lastPathComponent ?? "hard disk"): \(error)")
+        }
+        view.updateJoystick()
+        updateTitle()
+    }
+
     private func choose(_ extensions: [String]) -> URL? {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = extensions.compactMap { UTType(filenameExtension: $0) }
@@ -417,6 +478,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func chooseROM() { if let url = choose(["rom", "bin"]) { open(rom: url) } }
     @objc func chooseADF() { if let url = choose(["adf"]) { insert(adf: url) } }
     @objc func ejectDisk() { emulator.eject(); updateTitle() }
+    @objc func chooseHardDisk() { if let url = choose(["hdf"]) { attach(hardDisk: url) } }
+    @objc func detachHardDisk() { attach(hardDisk: nil) }
+    @objc func toggleFastRAM(_ sender: NSMenuItem) {
+        do { try emulator.setFastRAM(!emulator.fastRAM) } catch { alert("Reset failed: \(error)") }
+        sender.state = emulator.fastRAM ? .on : .off
+        view.updateJoystick()
+    }
     @objc func resetMachine() {
         do { try emulator.reset() } catch { alert("Reset failed: \(error)") }
         view.updateJoystick()
@@ -434,6 +502,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         machine.addItem(withTitle: "Open Kickstart ROM…", action: #selector(chooseROM), keyEquivalent: "k")
         machine.addItem(withTitle: "Insert Disk (DF0)…", action: #selector(chooseADF), keyEquivalent: "o")
         machine.addItem(withTitle: "Eject Disk", action: #selector(ejectDisk), keyEquivalent: "e")
+        machine.addItem(.separator())
+        machine.addItem(withTitle: "Attach Hard Disk (DH0)…", action: #selector(chooseHardDisk), keyEquivalent: "d")
+        machine.addItem(withTitle: "Detach Hard Disk", action: #selector(detachHardDisk), keyEquivalent: "")
+        let fast = machine.addItem(withTitle: "8 MB Fast RAM", action: #selector(toggleFastRAM(_:)), keyEquivalent: "")
+        fast.state = emulator.fastRAM ? .on : .off
         machine.addItem(.separator())
         machine.addItem(withTitle: "Reset", action: #selector(resetMachine), keyEquivalent: "r")
         machine.addItem(.separator())
