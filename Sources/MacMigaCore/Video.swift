@@ -203,6 +203,14 @@ extension AmigaMemory {
         }
     }
 
+    /// The bits of a bitplane byte spread over a 64-bit word, leftmost pixel in the lowest
+    /// byte, so that eight pixels of a plane join their colour indices with one shift and OR.
+    static let pixelSpread: [UInt64] = (0..<256).map { (byte: Int) -> UInt64 in
+        var spread: UInt64 = 0
+        for pixel in 0..<8 where byte & (0x80 >> pixel) != 0 { spread |= 1 << UInt64(pixel * 8) }
+        return spread
+    }
+
     /// Fetches bitplane data for beam line `line` (advancing BPLxPT and adding modulos)
     /// and draws it into `video`.
     private mutating func renderLine(_ line: Int) {
@@ -252,11 +260,18 @@ extension AmigaMemory {
         // is reached is completed (hires DDF values are 4-aligned, e.g. $3C-$D0 = 20 units).
         let units = fetchStop >= fetchStart ? (fetchStop - fetchStart + 7) / 8 + 1 : 0
         let words = units * (hires ? 2 : 1)
-        var data = [UInt16](repeating: 0, count: planes * words)
+        // Planar to chunky, eight pixels per table lookup: byte k of an element holds the
+        // colour index bits of data bit k. Even planes fill the first half and odd planes the
+        // second, because BPLCON1 scrolls them separately.
+        let spread = Self.pixelSpread
+        var chunky = [UInt64](repeating: 0, count: words * 4)
         for plane in 0..<planes {
             var pointer = custom.bitplanePointers[plane]
+            let base = (plane & 1) * words * 2
             for word in 0..<words {
-                data[plane * words + word] = chipWord(at: pointer)
+                let value = chipWord(at: pointer)
+                chunky[base + word * 2] |= spread[Int(value >> 8)] << UInt64(plane)
+                chunky[base + word * 2 + 1] |= spread[Int(value & 0xFF)] << UInt64(plane)
                 pointer &+= 2
             }
             let modulo = Int16(bitPattern: custom.register(plane & 1 == 0 ? R.bpl1mod : R.bpl2mod))
@@ -270,24 +285,36 @@ extension AmigaMemory {
         let dataStart = fetchStart * 2 + (hires ? 9 : 17) // lowres pixel of the first data bit
         let horizontalStart = Int(diwStart & 0xFF), horizontalStop = Int(diwStop & 0xFF) | 0x100
         let bitCount = words * 16
+        // Position of the first data bit of the even and odd planes (they scroll separately),
+        // in the unit the data advances by: hires pixels in hires, lowres pixels otherwise.
+        let evenOrigin = (dataStart + (bplcon1 & 0xF)) * (hires ? 2 : 1)
+        let oddOrigin = (dataStart + ((bplcon1 >> 4) & 0xF)) * (hires ? 2 : 1)
         var held = raw[0]
+        var color = colors[0]
         for column in 0..<Video.width {
+            // A lowres pixel is two columns wide and colour changes land on 4-column
+            // boundaries, so its second column repeats the first.
+            if !hires && column & 1 == 1 {
+                video.set(row: line, column: column, color)
+                continue
+            }
             if nextChange < changes.count { applyChanges(upTo: column) }
             let hiresPosition = Video.firstLowresColumn * 2 + column
             let lowres = hiresPosition >> 1
             guard lowres >= horizontalStart, lowres < horizontalStop else {
-                video.set(row: line, column: column, colors[0])
+                color = colors[0]
+                video.set(row: line, column: column, color)
                 continue
             }
+            let position = hires ? hiresPosition : lowres
+            let evenBit = position - evenOrigin, oddBit = position - oddOrigin
             var index = 0
-            for plane in 0..<planes {
-                let start = dataStart + (plane & 1 == 0 ? bplcon1 & 0xF : (bplcon1 >> 4) & 0xF)
-                let bit = hires ? hiresPosition - start * 2 : lowres - start
-                guard bit >= 0, bit < bitCount else { continue }
-                let word = data[plane * words + (bit >> 4)]
-                index |= Int((word >> (15 - UInt16(bit & 15))) & 1) << plane
+            if evenBit >= 0, evenBit < bitCount {
+                index = Int(UInt8(truncatingIfNeeded: chunky[evenBit >> 3] >> UInt64((evenBit & 7) * 8)))
             }
-            let color: UInt32
+            if oddBit >= 0, oddBit < bitCount {
+                index |= Int(UInt8(truncatingIfNeeded: chunky[words * 2 + (oddBit >> 3)] >> UInt64((oddBit & 7) * 8)))
+            }
             if dualPlayfield {
                 let one = (index & 1) | (index >> 1 & 2) | (index >> 2 & 4)
                 let two = (index >> 1 & 1) | (index >> 2 & 2) | (index >> 3 & 4)
