@@ -74,6 +74,12 @@ public struct AmigaMemory {
         physical >= 0xD8_0000 && physical < 0xDF_F000
     }
 
+    /// `$E80000`–`$EFFFFF` is the Zorro II autoconfig window. No expansion boards are
+    /// fitted: reads return 0 (er_Type 0 is not a valid board type) and writes are ignored.
+    private static func isEmptyAutoconfig(_ physical: UInt32) -> Bool {
+        physical >= 0xE8_0000 && physical < 0xF0_0000
+    }
+
     /// Custom registers at `$DFF000`–`$DFFFFF`, plus the part of `$C00000`–`$D7FFFF` not
     /// backed by slow RAM: without RAM there, the A500 decodes those addresses to the
     /// custom chips, which Kickstart detects by writing INTENA through the mirror.
@@ -117,7 +123,7 @@ public struct AmigaMemory {
             let word = custom.readWord(offset: Int(physical & 0x1FE))
             return physical & 1 == 0 ? UInt8(word >> 8) : UInt8(truncatingIfNeeded: word)
         }
-        if Self.isEmptyIORange(physical) { return 0 }
+        if Self.isEmptyIORange(physical) || Self.isEmptyAutoconfig(physical) { return 0 }
         throw MemoryBusError.unmappedAddress(physical)
     }
 
@@ -148,7 +154,7 @@ public struct AmigaMemory {
             custom.writeWord(offset: Int(physical & 0x1FE), value: UInt16(value) << 8 | UInt16(value))
             return
         }
-        if Self.isEmptyIORange(physical) { return }
+        if Self.isEmptyIORange(physical) || Self.isEmptyAutoconfig(physical) { return }
         throw MemoryBusError.unmappedAddress(physical)
     }
 
