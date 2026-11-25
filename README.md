@@ -5,7 +5,8 @@ A work-in-progress Commodore Amiga 500 emulator for macOS.
 **Current milestone: booting from ADF floppy images.** Both local Kickstart
 ROMs draw their insert-disk screens and boot a bootblock from an ADF disk image,
 which then reads further sectors through trackdisk.device. There is no
-application UI, audio, sprites, keyboard or mouse yet. Booting real AmigaOS
+application UI or audio yet; sprites, keyboard, mouse and joystick are emulated
+but only reachable through the core API. Booting real AmigaOS
 Workbench disks or games has not been tested.
 
 ## Build and test
@@ -135,6 +136,19 @@ minterms, descending mode, modulos, inclusive/exclusive fill with FCI, and line
 mode (octants, SING). BZERO is set and INTREQ BLIT raised on completion; BBUSY
 never reads 1. Line texture bit order is unverified.
 
+Sprites: eight hardware sprites with DMA (control words fetched on line 25 and
+at VSTOP, data words from VSTART to VSTOP), manual mode (writing SPRxDATA arms,
+SPRxCTL disarms), 3-colour pairs (COLOR17–31) and attached 15-colour sprites.
+They are drawn in front of the playfields (BPLCON2 priority and collisions are
+not modelled) and clipped to the horizontal display window.
+
+Input (`AmigaMachine`): `key(_:pressed:)` queues Amiga raw key codes, sent to
+CIA-A's serial register as the keyboard transmits them (rotated left, inverted)
+with the SP interrupt; the next byte waits for the SPMODE handshake or a 143 ms
+timeout. No power-up key stream is sent. `mouse(dx:dy:left:right:)` drives the
+port-1 counters (JOY0DAT), /FIR0 and POTGOR DATLY; `joystick(_:fire:)` drives
+JOY1DAT and /FIR1. JOYTEST writes are honoured.
+
 `FloppyDrive.swift` models the internal DF0 on the CIAs: CIA-B port B select,
 motor (latched on select), side, direction and step; CIA-A /RDY, /TK0, /WPRO and
 /CHNG. `AmigaMemory.insertDisk(adf:)` inserts a 901,120-byte ADF image (always
@@ -154,7 +168,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-One hundred and nine tests cover the memory foundation and CPU subset. Coverage includes
+One hundred and thirteen tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -186,6 +200,8 @@ line. A drive test covers selection, motor latch, stepping and status lines. Dis
 tests decode a generated MFM track back to all 11 sectors (checksums, info
 fields, data, no adjacent 1 bits), check ADF size validation, disk change and
 write protect, synced DMA, and that a synced read without a disk never ends.
+Sprite/input tests cover a DMA sprite's colours, position and pointer, attached
+sprites, the keyboard handshake, mouse counters and buttons, and the joystick.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -230,8 +246,8 @@ validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. Sprites (mouse pointer), keyboard (CIA-A serial) and mouse/joystick input,
-   then boot a real Workbench disk.
+1. A macOS app window: display the framebuffer, forward keyboard and mouse,
+   insert ADFs; then boot a real Workbench disk.
 2. Remaining CPU pieces: ABCD/SBCD/NBCD, CHK, MOVEP, bus/address errors, timing.
 3. OCS custom chips: sprites, DMA slot timing, and audio.
 4. Disk writes, extra drives, index pulses and accurate disk timing.
