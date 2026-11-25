@@ -28,11 +28,22 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
 - 512 KiB zero-initialized RAM at `$000000`–`$07FFFF` when overlay is disabled.
 - A 512 KiB ROM window at `$F80000`–`$FFFFFF`, accepting 256 KiB images
   mirrored within that window or a full 512 KiB image.
-- A power-on ROM overlay over the first 512 KiB; a host method switches it
-  until CIA-A is implemented. Writes to ROM-selected addresses are ignored.
+- A power-on ROM overlay over the first 512 KiB, controlled by CIA-A PA0 (OVL,
+  pulled up while PA0 is an input). Writes to ROM-selected addresses are ignored.
+- Both CIAs (`CIA8520.swift`) decoded across `$A00000`–`$BFFFFF`: CIA-A on odd
+  bytes when A12 is low, CIA-B on even bytes when A13 is low, register from
+  A8–A11. Ports with data direction, timers A/B (latch, one-shot/continuous,
+  force load, high-byte start in one-shot, B counting A underflows), 24-bit TOD
+  with alarm and read latch, SDR storage, and ICR mask/clear-on-read. Timers and
+  TOD advance only through host calls (`tick(eClocks:)`, `pulseTOD()`); nothing
+  drives them from CPU time yet, and CIA interrupts are not routed to the CPU.
+  An unselected CIA byte lane reads `$FF` (real hardware: open bus).
+- The `$F00000`–`$F7FFFF` diagnostic-cartridge slot is empty: reads return 0
+  (never the `$1111` signature) and writes are ignored. Real hardware returns
+  open-bus data there.
 - Big-endian byte, word, and longword access with 24-bit address masking.
 - Rejection of odd-address word/longword access. Longwords can be word-aligned.
-- Reset-vector fetching from addresses 0 and 4 after restoring the overlay.
+- Reset-vector fetching from addresses 0 and 4 after resetting both CIAs.
   Reset retains RAM and does not emulate the CPU RESET instruction.
 
 ROM validation checks size only, not contents, checksum, or compatibility.
@@ -72,7 +83,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-Fifty-five tests cover the memory foundation and CPU subset. Coverage includes
+Sixty-four tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -85,6 +96,9 @@ byte CMP and word/long/CMPA boundaries against a wide-integer reference, CMPI
 sizes and memory destinations, and DBcc counting, conditions, and faults.
 Existing exhaustive MOVEQ and branch
 condition tests remain. Synthetic programs exercise calls and memory copying.
+CIA tests cover port/direction mixing, A12/A13 byte-lane decoding and mirrors,
+the Kickstart overlay-off sequence, timer latch/underflow/one-shot/force-load
+and cascade, TOD halt/latch/alarm, and ICR masking.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -93,33 +107,34 @@ These tests establish the implemented contract, not Amiga software compatibility
 ROMs remain user-supplied and ignored by Git. From the repository root:
 
 ```sh
-swiftc Sources/MacMigaCore/AmigaMemory.swift Sources/MacMigaCore/MC68000.swift Tools/KickstartProbe.swift -o /tmp/MacMiga-KickstartProbe
-/tmp/MacMiga-KickstartProbe "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+swiftc -O Sources/MacMigaCore/*.swift Tools/KickstartProbe.swift -o /tmp/MacMiga-KickstartProbe
+/tmp/MacMiga-KickstartProbe [--limit N] "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
 ```
 
-The probe stops at the first diagnostic or after 10,000 instructions; reaching
+The probe stops at the first diagnostic or after `--limit` instructions
+(default 10,000); reaching
 the limit does not establish boot success. The two local files tested on
 November 25, 2026 were each 524,288 bytes. Their measured startup results:
 
 | File | Reset PC | Stop point | Completed instructions |
 | --- | --- | --- | --- |
-| kickstart-1.3.rom | $00FC00D2 | CMPI.W at $00FC00F4 reads unmapped $F00000 | 262,151 |
-| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | CMPI.W at $00F80100 reads unmapped $F00000 | 429,164 |
+| kickstart-1.3.rom | $00FC00D2 | MOVE.W D0,$9A(A4) at $00FC0118 writes unmapped $DFF09A (INTENA) | 262,157 |
+| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | MOVE.B #0,$DA8000 at $00F8010A writes unmapped $DA8000 (A600 Gayle) | 429,166 |
 
-Both ROMs now exceed the probe's 10,000-instruction limit inside startup delay
-loops; the stop points above were measured with a separate local run without
-that limit. Both stop on a memory error, not an unsupported opcode: they read
-`$F00000`, which this memory map does not decode yet.
+Measured with `--limit 50000000`. Both ROMs pass their startup delay loops and
+the empty diagnostic slot. Kickstart 1.3 then turns the overlay off through
+CIA-A and stops at the first custom-chip register write; 3.1 stops earlier at
+an A600 Gayle register probe.
 
 Neither ROM booted. The probe reports raw reset-vector values and does not
 validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. Decode the `$F00000`–`$F7FFFF` region both ROMs probe next, then continue
-   CPU work (logic, shifts, remaining instructions, exceptions, interrupts, timing)
-   as the ROMs reach new opcodes.
-2. CIA-A/B registers and timers, real overlay control, interrupt routing.
+1. Custom-chip register file at `$DFF000` (INTENA/INTREQ/DMACON first) and the
+   A600 Gayle probe region 3.1 touches, then continue CPU work (logic, shifts,
+   remaining instructions, exceptions, interrupts, timing) as the ROMs advance.
+2. Drive CIA timers/TOD from emulated time and route CIA interrupts (INT2/INT6).
 3. OCS custom chips: raster timing, DMA, bitplanes, Copper, Blitter, and audio.
 4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
 5. Native macOS display/audio interface and user-selected firmware/media.
