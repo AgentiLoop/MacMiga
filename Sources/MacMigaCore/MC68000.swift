@@ -12,6 +12,10 @@ public struct MC68000: Equatable, Sendable {
     public var supervisorStackPointer: UInt32 = 0
     /// Set by STOP; the CPU executes nothing until an accepted interrupt clears it.
     public private(set) var isStopped = false
+    /// When false (hardware behaviour), unassigned opcodes and invalid addressing modes take the
+    /// illegal-instruction exception (vector 4, stacked PC = the opcode's address). When true,
+    /// `step` throws `CPUError.unsupportedInstruction` instead, for decoder diagnostics.
+    public var stopsOnIllegalInstruction = false
 
     /// Deterministic host initialization, not a claim about hardware power-on register values.
     public init() {}
@@ -69,6 +73,8 @@ public struct MC68000: Equatable, Sendable {
         } catch let trap as Trap {
             if let condition = trap.condition { status = (status & 0xFF00) | condition }
             try enterException(vector: trap.vector, returnAddress: trap.returnAddress, memory: &memory)
+        } catch CPUError.unsupportedInstruction(_, let address) where !stopsOnIllegalInstruction {
+            try enterException(vector: 4, returnAddress: address, memory: &memory)
         }
     }
 

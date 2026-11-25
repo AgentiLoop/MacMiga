@@ -180,6 +180,7 @@ private func compareFlags(_ destination: UInt32, _ source: UInt32, bits: Int) ->
         var memory = try compareMemory([opcode], at: 0x1FFFFE)
         var cpu = MC68000()
         cpu.programCounter = 0x1FFFFE
+        cpu.stopsOnIllegalInstruction = true
         let before = cpu
         #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x1FFFFE)) {
             try cpu.step(memory: &memory)

@@ -118,6 +118,7 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
             cpu.programCounter = 0x1FFFFE
             for index in 0..<8 { cpu[address: index] = 0x400 }
             try memory.writeLong(0xDEADBEEF, at: 0x3FC)
+            cpu.stopsOnIllegalInstruction = true
             let before = cpu
             #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x1FFFFE)) {
                 try cpu.step(memory: &memory)

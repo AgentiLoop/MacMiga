@@ -85,3 +85,17 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
     #expect(try m.readLong(at: 0x7FFC) == 0x108) // return to the next instruction
     #expect(try m.readWord(at: 0x7FFA) & 0x08 != 0) // stacked N
 }
+
+@Test func unassignedOpcodeTakesIllegalInstructionException() throws {
+    // $4808 (LINK.L, a 68020 instruction) is not a 68000 opcode.
+    let (cpu, memory) = try run([0x4808]) { cpu, memory in
+        cpu.statusRegister = 0x0000
+        cpu.userStackPointer = 0x6000
+        try memory.writeLong(0x3000, at: 4 * 4)
+    }
+    #expect(cpu.programCounter == 0x3000)
+    #expect(cpu.statusRegister & 0x2000 != 0)
+    var m = memory
+    #expect(try m.readLong(at: 0x7FFC) == 0x100) // stacked PC is the illegal opcode itself
+    #expect(try m.readWord(at: 0x7FFA) == 0x0000)
+}

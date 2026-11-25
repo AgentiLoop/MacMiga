@@ -181,6 +181,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
         try memory.writeWord(opcode, at: 0x100)
         var cpu = MC68000()
         cpu.programCounter = 0x100
+        cpu.stopsOnIllegalInstruction = true
         let before = cpu
         #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x100)) {
             try cpu.step(memory: &memory)

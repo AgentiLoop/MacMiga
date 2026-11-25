@@ -196,6 +196,7 @@ private func referenceFlags(_ destination: UInt32, _ source: UInt32, size: Int, 
         var cpu = MC68000()
         cpu.programCounter = 0x1FFFFE
         for index in 0..<8 { cpu[address: index] = 0x400; cpu[data: index] = 0x55 }
+        cpu.stopsOnIllegalInstruction = true
         let before = cpu
         #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x1FFFFE)) {
             try cpu.step(memory: &memory)
