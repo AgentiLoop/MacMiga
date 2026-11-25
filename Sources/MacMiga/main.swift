@@ -290,8 +290,11 @@ final class DisplayView: NSView {
         guard !unchanged else { return }
         shownPixels = video.pixels.withUnsafeBufferPointer { Data(buffer: $0) }
         guard let provider = CGDataProvider(data: shownPixels as CFData) else { return }
+        // In the window's own colour space Core Animation takes the pixels as they are; any
+        // other space makes it convert every frame on the CPU.
         layer?.contents = CGImage(width: Video.width, height: Video.height, bitsPerComponent: 8, bitsPerPixel: 32,
-                                  bytesPerRow: Video.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bytesPerRow: Video.width * 4,
+                                  space: window?.colorSpace?.cgColorSpace ?? CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
                                                            | CGBitmapInfo.byteOrder32Little.rawValue),
                                   provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
