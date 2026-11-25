@@ -38,6 +38,15 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
   TOD advance only through host calls (`tick(eClocks:)`, `pulseTOD()`); nothing
   drives them from CPU time yet, and CIA interrupts are not routed to the CPU.
   An unselected CIA byte lane reads `$FF` (real hardware: open bus).
+- OCS custom chip registers (`CustomChips.swift`) at `$DFF000`–`$DFFFFF`,
+  mirrored every `$200`: set/clear DMACON, INTENA, INTREQ and ADKCON with their
+  read-back registers, Paula interrupt-level priority, a PAL beam counter for
+  VPOSR/VHPOSR that raises VERTB each frame, and storage of all other writes.
+  Word accesses are not split; a byte write appears on both bus halves. No DMA,
+  video, audio, Blitter or Copper behaviour yet, and nothing advances the beam
+  from CPU time. Write-only registers read 0 (real hardware: bus noise).
+- `$D80000`–`$DFEFFF` (RTC, A600 Gayle/IDE on other models) is empty on a stock
+  A500 here: reads return 0 and writes are ignored.
 - The `$F00000`–`$F7FFFF` diagnostic-cartridge slot is empty: reads return 0
   (never the `$1111` signature) and writes are ignored. Real hardware returns
   open-bus data there.
@@ -83,7 +92,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-Sixty-four tests cover the memory foundation and CPU subset. Coverage includes
+Sixty-nine tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -98,7 +107,9 @@ Existing exhaustive MOVEQ and branch
 condition tests remain. Synthetic programs exercise calls and memory copying.
 CIA tests cover port/direction mixing, A12/A13 byte-lane decoding and mirrors,
 the Kickstart overlay-off sequence, timer latch/underflow/one-shot/force-load
-and cascade, TOD halt/latch/alarm, and ICR masking.
+and cascade, TOD halt/latch/alarm, and ICR masking. Custom-chip tests cover
+set/clear registers, unsplit word writes, mirrors, interrupt priorities, the
+beam counter, and the empty Gayle range.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -118,22 +129,21 @@ November 25, 2026 were each 524,288 bytes. Their measured startup results:
 
 | File | Reset PC | Stop point | Completed instructions |
 | --- | --- | --- | --- |
-| kickstart-1.3.rom | $00FC00D2 | MOVE.W D0,$9A(A4) at $00FC0118 writes unmapped $DFF09A (INTENA) | 262,157 |
-| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | MOVE.B #0,$DA8000 at $00F8010A writes unmapped $DA8000 (A600 Gayle) | 429,166 |
+| kickstart-1.3.rom | $00FC00D2 | unsupported $0800 (BTST #imm) at $00FC0150 | 262,263 |
+| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | unsupported $4239 (CLR.B abs.L) at $00F8015A | 429,172 |
 
 Measured with `--limit 50000000`. Both ROMs pass their startup delay loops and
-the empty diagnostic slot. Kickstart 1.3 then turns the overlay off through
-CIA-A and stops at the first custom-chip register write; 3.1 stops earlier at
-an A600 Gayle register probe.
+the empty diagnostic slot. Kickstart 1.3 turns the overlay off through CIA-A
+and initialises custom-chip registers; 3.1 passes its Gayle probe. Both now stop
+on unimplemented CPU instructions.
 
 Neither ROM booted. The probe reports raw reset-vector values and does not
 validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. Custom-chip register file at `$DFF000` (INTENA/INTREQ/DMACON first) and the
-   A600 Gayle probe region 3.1 touches, then continue CPU work (logic, shifts,
-   remaining instructions, exceptions, interrupts, timing) as the ROMs advance.
+1. CPU work the ROMs now need: bit operations (BTST/BSET/BCLR/BCHG), CLR/NEG/NOT/
+   TST, logic, shifts, then exceptions, interrupts and timing.
 2. Drive CIA timers/TOD from emulated time and route CIA interrupts (INT2/INT6).
 3. OCS custom chips: raster timing, DMA, bitplanes, Copper, Blitter, and audio.
 4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
