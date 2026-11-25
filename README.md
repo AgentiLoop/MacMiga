@@ -1,6 +1,33 @@
 # MacMiga
 
-A work-in-progress Commodore Amiga 500 emulator for macOS.
+A Commodore Amiga 500 emulator for macOS, written in Swift. MacMiga is open
+source under the [MIT License](LICENSE) and a work in progress. There is no
+release to download yet: build it from source, see "Build from source" below.
+
+<table>
+  <tr>
+    <td width="50%"><img alt="The MacMiga window showing the Kickstart 3.1 insert-disk screen" src="docs/app-window.png" /></td>
+    <td width="50%"><img alt="The Kickstart 1.3 insert-disk screen" src="docs/kickstart-1.3.png" /></td>
+  </tr>
+  <tr>
+    <td align="center">The MacMiga window, Kickstart 3.1 waiting for a disk</td>
+    <td align="center">Kickstart 1.3 waiting for a disk</td>
+  </tr>
+  <tr>
+    <td width="50%"><img alt="The Kickstart 3.1 shell after booting from a hard disk image" src="docs/hard-disk-shell.png" /></td>
+    <td width="50%"><img alt="The AROS shell" src="docs/aros-shell.png" /></td>
+  </tr>
+  <tr>
+    <td align="center">Kickstart 3.1 booted from a hard disk image</td>
+    <td align="center">AROS, started from its boot floppy</td>
+  </tr>
+</table>
+
+The first picture is a capture of the app's window. The other three are frames
+written by the emulator itself (`KickstartProbe --frames`, see "Local Kickstart
+startup probe"), with each line doubled as the app's window shows them.
+
+## Status
 
 **Current milestone: booting from ADF floppy images.** Both local Kickstart
 ROMs draw their insert-disk screens and boot a bootblock from an ADF disk image,
@@ -22,11 +49,38 @@ game made that way from an LHA archive started from the hard disk under
 Kickstart 3.1. WHDLoad 20.1 runs from such a disk with Kickstart 3.1 and fast
 RAM; one install (Pac-Man) has been tried. See "WHDLoad".
 
+## Requirements
+
+- macOS 13 or newer.
+- A Swift 6 toolchain: Xcode 16 or newer, or a toolchain from swift.org. The
+  last build was made with Swift 6.4.2 on macOS 27.2 (Apple silicon).
+- A Kickstart ROM image, which is not included: a raw, unencrypted file of
+  256 KiB or 512 KiB. Kickstart 1.3 and Kickstart 3.1 (A500/A600/A2000) are the
+  two that have been run.
+
+## Build from source
+
+```sh
+git clone https://github.com/AgentiLoop/MacMiga.git
+cd MacMiga
+swift build -c release
+```
+
+The package needs nothing from outside this repository (the 68000 core is the
+local package `Packages/M68K`). The build puts three programs in
+`.build/release`: `MacMiga`, the app, and the command-line tools `MakeHardfile`
+(see "Making a hard disk") and `KickstartProbe` (see "Local Kickstart startup
+probe").
+
 ## Run the app
 
 ```sh
-swift run -c release MacMiga "Kickstart ROMs/kickstart-1.3.rom" [disk.adf] [disk.hdf]
+swift run -c release MacMiga path/to/kickstart.rom [disk.adf] [disk.hdf]
 ```
+
+The examples in this README keep the ROMs in a folder named `Kickstart ROMs`
+inside the repository. Git ignores ROM, ADF and HDF files, so they stay out of
+commits.
 
 A `.hdf` argument, or Machine ▸ Attach Hard Disk (DH0)… (⌘D), attaches a
 hardfile and restarts the machine; Detach Hard Disk removes it. Blocks the
@@ -44,28 +98,27 @@ in the current folder, or asks for one. The Machine menu opens a Kickstart ROM
 the full 736×312 frame doubled vertically, emulating one frame per 1/50 s timer
 tick on the main thread. Keys map by US-layout position to Amiga raw codes
 (Command → Amiga keys, Option → Alt, Page Up/Help → Help); Command-key shortcuts
-go to the menu instead, so the Amiga keys only work as plain modifiers. Mouse
-motion inside the window is sent as relative counts and the Mac cursor is not
-captured, so the Amiga pointer and Mac cursor are not aligned. No joystick
-mapping or settings yet. Audio plays through AVAudioEngine at the output
+go to the menu instead, so the Amiga keys only work as plain modifiers. A click
+in the window captures the Mac pointer for the Amiga mouse, and pressing ⌘
+gives it back. The joystick in port 2 is on the numeric keypad (8/2/4/6 steer,
+7/9/1/3 are the diagonals, 0, 5 and Enter fire) and right Option also fires;
+Machine ▸ Arrow Keys Control Joystick (Port 2) (⌘J) puts it on the arrow keys,
+and a game controller steers it too. Audio plays through AVAudioEngine at the output
 device's sample rate with at most ~100 ms queued; silence is inserted when the
 emulator falls behind. Verified on November 25, 2026 by launching it
 with Kickstart 3.1 and screen-capturing the window, which showed the
 insert-disk screen; keyboard and mouse input in the app were not tested by hand.
 
-## Build and test
-
-Requires Swift 6 or newer; the package targets macOS 13 or newer.
+## Test
 
 ```sh
-swift build
 swift test
-swift build -c release
-swift test -c release
 swift test --package-path Packages/M68K
 ```
 
-The library product is `MacMigaCore`. The 68000 core is a separate package,
+`swift test` runs the tests of the Amiga machine and the second command those
+of the CPU package; add `-c release` to either for a release build (see
+"Tests"). The library product is `MacMigaCore`. The 68000 core is a separate package,
 `Packages/M68K`, with no Amiga code in it (see "CPU package"). Tests use generated byte arrays rather
 than proprietary firmware. No Kickstart ROMs or disk images are included.
 Supply your own authorized, raw, unencrypted ROM when integrating the core.
@@ -720,3 +773,11 @@ Motorola/Freescale, *M68000 8-/16-/32-Bit Microprocessors User's Manual*
 (MC68000UM), reset operation and address-error sections.
 Motorola, *M68000 Family Programmer's Reference Manual* (M68000PRM),
 integer instructions: MOVEQ, NOP, Bcc, BRA, BSR, RTS, JMP, JSR, and LEA.
+
+## License
+
+MacMiga is released under the MIT License; see [LICENSE](LICENSE).
+
+Kickstart ROMs, AmigaOS, AROS, WHDLoad and Amiga software belong to their
+owners. None of them is included in this repository and none is covered by
+this license. Amiga and Kickstart are trademarks of their respective owners.
