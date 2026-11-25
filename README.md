@@ -7,7 +7,11 @@ ROMs draw their insert-disk screens and boot a bootblock from an ADF disk image,
 which then reads further sectors through trackdisk.device. Paula audio is
 emulated and played through the Mac's default output. The `MacMiga` app shows
 the emulated display in a window and forwards the Mac keyboard and mouse. Booting real AmigaOS
-Workbench disks or games has not been tested.
+Workbench disks has not been tested.
+
+**AROS:** the boot floppy of AROS, the free AmigaOS-compatible system, starts
+under Kickstart 3.1, restarts the machine into AROS's own ROM image, and reaches
+the AROS shell on an Intuition screen. See "AROS".
 
 **Hard disk:** a hard disk image (`.hdf`) can be attached: either a hardfile
 (one AmigaDOS partition, mounted as `DH0`) or a partitioned image with a Rigid
@@ -99,6 +103,10 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
   video, audio, Blitter or Copper behaviour yet. Write-only registers read 0 (real hardware: bus noise),
   except DENISEID (`$07C`), which reads `$FFFF`: the OCS Denise has no ID
   register, and a low byte of 0 made Kickstart 3.1 detect an ECS Denise.
+- Serial port: nothing is connected. SERDATR reads `$3800` (transmitter empty,
+  receive line idle); a write to SERDAT is "sent" at once, raises the TBE
+  interrupt request, and is kept in `custom.serialOutput` (the most recent
+  64 KiB) for the host to read. Nothing is ever received; SERPER is ignored.
 - `$D80000`–`$DFEFFF` (RTC, A600 Gayle/IDE on other models) is empty on a stock
   A500 here: reads return 0 and writes are ignored.
 - The `$F00000`–`$F7FFFF` diagnostic-cartridge slot is empty: reads return 0
@@ -108,9 +116,11 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
 - Rejection of odd-address word/longword access when the bus is used directly
   (the CPU never passes one on; it takes its address-error exception instead).
   Longwords can be word-aligned.
-- `reset()` resets the CIAs, custom chips and expansion boards and returns the
-  vectors at addresses 0 and 4. It retains RAM and does not emulate the CPU
-  RESET instruction.
+- `resetDevices()` is the reset line: the CIAs (which brings the ROM overlay
+  back), the custom chips, the floppy drive's latches and the expansion boards
+  return to their power-on state, and RAM keeps its contents. The CPU's RESET
+  instruction calls it. `reset()` does the same and returns the vectors at
+  addresses 0 and 4.
 
 ROM validation checks size only, not contents, checksum, or compatibility.
 Unimplemented addresses throw explicit errors rather than returning fake
@@ -128,13 +138,18 @@ emulators are planned (NeXT needs a 68030/68040 with MMU and FPU, which this
 core does not have).
 
 - `M68KBus` is the protocol a machine implements for its memory map: big-endian
-  `readByte/Word/Long(at:)` and `writeByte/Word/Long(_:at:)`, all throwing.
-  `AmigaMemory` conforms to it.
+  `readByte/Word/Long(at:)` and `writeByte/Word/Long(_:at:)`, all throwing,
+  and `resetDevices()`, which the RESET instruction calls (it does nothing
+  unless the machine implements it). `AmigaMemory` conforms to it.
 - `MC68000` is a value type holding only CPU state. `reset(memory:)` loads SSP
   and PC from addresses 0 and 4, `step(memory:)` executes one instruction and
   `interrupt(level:memory:)` presents an autovectored interrupt; each takes the
   bus as `inout`. The machine resets its own devices and decides when to
   interrupt.
+- After RESET the CPU executes the opcode it had already fetched, as a 68000's
+  prefetch does, even if the reset changed what is at that address. Software
+  that restarts a machine from RAM depends on this (`RESET` followed by a
+  one-word `JMP (An)`, while the reset puts the boot ROM over the code).
 - The CPU checks word and long accesses for odd addresses itself, so a bus
   needs no alignment rule. An error thrown by the bus stops `step` with the
   CPU's registers unchanged.
@@ -147,16 +162,18 @@ core does not have).
 
 `MacMigaCore` re-exports the two public types as `MC68000` and `CPUError`.
 
-The package carries its own tests, 71 of them, and they use no Amiga code. The
+The package carries its own tests, 74 of them, and they use no Amiga code. The
 instruction-level tests were moved here from the MacMiga test target. Their
 checks are unchanged except in two places: the error for an address with
 nothing behind it is now the test bus's own, and the reset test puts its
 vectors in RAM instead of reading them through the Amiga's ROM overlay (the
 MacMiga target has a test for that). They run on `TestBus`, a memory map
 made for them: 2 MiB of RAM at `$000000`, 256 KiB of read-only ROM at
-`$FC0000`, and a hole in between where every access throws. Four more tests
+`$FC0000`, and a hole in between where every access throws. Seven more tests
 run on a 64 KiB RAM bus (reset, a program with a loop and a subroutine, STOP
-ended by an interrupt, the address-error frame, illegal and TRAP vectors).
+ended by an interrupt, the address-error frame, illegal and TRAP vectors, and
+the RESET instruction: the device reset, the kept prefetch, privilege, and an
+interrupt discarding the prefetch).
 What the MacMiga target still tests of the CPU is its use in the machine:
 interrupts, STOP, and power-on and reset through the ROM overlay.
 
@@ -170,7 +187,7 @@ NEG/NEGX/CLR/NOT/TST/TAS, AND/OR/EOR and their immediate forms (including to
 CCR/SR), BTST/BCHG/BCLR/BSET, ASL/ASR/LSL/LSR/ROL/ROR/ROXL/ROXR (register and
 memory), MULU/MULS/DIVU/DIVS, SWAP, EXT, EXG, MOVEM, MOVE to/from SR and CCR,
 MOVE USP, LINK/UNLK, Scc, DBcc, Bcc/BRA/BSR, RTS, RTR, RTE, TRAP, TRAPV, RESET
-(no device reset), STOP, NOP, ABCD/SBCD/NBCD (N and V follow the undocumented
+(resets the devices on the bus), STOP, NOP, ABCD/SBCD/NBCD (N and V follow the undocumented
 68000 results as Musashi computes them), CHK.W (trap 6 with N set for a negative
 register; Z/V/C cleared) and MOVEP.W/.L. This completes the 68000 instruction set;
 unassigned encodings and invalid addressing modes take the illegal-instruction
@@ -356,7 +373,11 @@ the 512 KiB machine. For software that needs the extra chip memory, see
 ```sh
 swift run -c release MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... <folder | archive.lha>... <output.hdf>
 swift run -c release MakeHardfile --list <folder | archive.lha>
+swift run -c release MakeHardfile --extract <archive.lha> <new folder>
 ```
+
+`--extract` only unpacks an LHA archive into a folder on the Mac, for instance
+to get at an ADF inside it.
 
 `MakeHardfile` writes a hardfile holding the contents of Mac folders and LHA
 archives, ready to attach as DH0. Several sources are merged into one volume
@@ -446,6 +467,48 @@ Not tried: any other install, installs that need a Kickstart image file or a
 disk from a game, starting from a Workbench icon, and WHDLoad in the app
 window (the app runs the same core as the probe).
 
+## AROS
+
+AROS is a free, open-source operating system compatible with AmigaOS 3.1. Its
+Amiga boot floppy is a way to run a whole AmigaOS-like system in MacMiga
+without any Commodore disk (a Kickstart ROM is still needed to start the
+floppy). MacMiga contains nothing from AROS; get the nightly build
+`AROS-<date>-amiga-m68k-boot-floppy.lha` from the AROS project's downloads
+(sourceforge.net/projects/aros, folder `nightly2`).
+
+```sh
+swift run -c release MakeHardfile --extract AROS-20261124-amiga-m68k-boot-floppy.lha aros
+swift run -c release MacMiga "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom" aros/*/bootdisk-amiga-m68k.adf
+```
+
+Turn on Machine ▸ 8 MB Fast RAM or 1 MB Chip RAM first; the stock memory is
+too small. Kickstart boots the floppy, whose first command (`AROSBootstrap`)
+loads AROS's ROM image into RAM and restarts the machine into it. AROS then
+starts from the same floppy.
+
+Checked on November 25, 2026 with the probe and the boot floppy of the
+2026-11-24 nightly build:
+
+| Machine | Result |
+| --- | --- |
+| Kickstart 3.1, 8 MiB fast RAM | AROS started (its exec lists the fast, slow and chip memory and its ROM regions), opened a hires screen with a shell window showing the AROS copyright text, and put up the requester "Please insert volume AROS Live CD in any drive" |
+| the same, plus a small hardfile whose volume is named "AROS Live CD" | no requester: AROS mounted `DH0` through `macmiga.device`, its startup script went on and ended at a shell prompt with "Can't find SYS:Classes" (the volume was empty apart from a marker file); keys sent to the machine appeared at the prompt and the shell answered "object not found" |
+| Kickstart 3.1, 1 MiB chip RAM, no fast RAM | AROS started, as in the first row |
+| Kickstart 3.1, stock memory or 1 MiB fast RAM | stayed in the Kickstart shell (with stock memory, after `AROSBootstrap` had printed its version and a memory list) |
+| Kickstart 1.3, 1 MiB chip RAM | stayed in the Kickstart 1.3 CLI |
+
+Getting this far needed two fixes that are not specific to AROS. AROS writes
+its boot log to the serial port and waits for the transmitter; SERDATR read 0,
+so it waited for ever. And the restart into AROS is done with the 68000's
+RESET instruction, which did not reset anything here: the fast RAM board
+stayed configured, AROS never found it, and ended in its alert loop, blinking
+the background red, with `$8100000C` in a register (in exec's list of alerts
+that number is "memory list insane").
+
+Not tried: the AROS Live CD's contents (the desktop, Wanderer, is on it),
+the mouse under AROS, AROS in the app window, and AROS's own ROM files in
+place of Kickstart (they need a second ROM area at `$E00000`).
+
 ## Audio (Paula)
 
 `Sources/MacMigaCore/Paula.swift` runs four channels every colour clock.
@@ -514,9 +577,9 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-The tests are in two places. `swift test` runs the 91 tests of the Amiga
+The tests are in two places. `swift test` runs the 93 tests of the Amiga
 machine in `Tests/MacMigaCoreTests`. `swift test --package-path Packages/M68K`
-runs the 71 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
+runs the 74 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
 branch, logic/shift and decimal/MOVEP/CHK tests described below). Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
@@ -576,7 +639,10 @@ Chip RAM tests cover the three sizes and their mirrors, the overlay and reset
 with 1 MiB, the Agnus ID, a Blitter copy and a Copper list above 512 KiB (and
 their wrap-around with 512 KiB), BLTCON0L, blits taller than 1,024 lines and
 wider than 64 words through BLTSIZV/BLTSIZH, and that the OCS Agnus ignores
-those registers. A custom-chip test covers the DENISEID read.
+those registers. Custom-chip tests cover the DENISEID read and the serial
+port. A machine test covers the RESET instruction run from chip RAM: the
+overlay, the chips and a fast RAM board are reset and the prefetched jump is
+still executed.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -597,6 +663,9 @@ Kickstart 2.0 and newer graphics.library's ChipRevBits0 (which chips Kickstart
 found).
 `--key 4000:59` presses the key with Amiga raw code `$59` (F10) at frame 4000
 for 5 frames; `--fire 2600` holds the port-2 fire button for 10 frames.
+Whatever the software wrote to the serial port is printed, and `--trace N`
+executes N more instructions after the limit, printing the PC, the next three
+words and all registers before each.
 
 The probe stops at the first diagnostic or after `--limit` instructions
 (default 10,000); reaching
@@ -625,21 +694,23 @@ if the sector starts with `MACM`, blue otherwise. With `--adf` and `--limit
 without the marker gives blue. So both ROMs validated the bootblock, ran it, and
 trackdisk.device seeked, read and decoded a sector through disk DMA.
 
-Neither ROM has booted a real Workbench disk. The probe reports raw
+Neither ROM has booted a real Workbench disk (AROS has been booted; see "AROS"). The probe reports raw
 reset-vector values and does not validate ROM identity, checksum, or software
 compatibility.
 
 ## Next milestones
 
-1. WHDLoad: try more installs and fix what breaks. Hard disk: load file
+1. Desktop: put the AROS Live CD's contents on a hard disk image and get to
+   its desktop (Wanderer); fix what breaks.
+2. WHDLoad: try more installs and fix what breaks. Hard disk: load file
    systems stored in a partition table; try an image partitioned on an Amiga.
-2. CPU package: instruction timing; later a 68030/68040 with MMU and FPU for
+3. CPU package: instruction timing; later a 68030/68040 with MMU and FPU for
    NeXT.
-3. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
+4. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
    what breaks.
-4. OCS custom chips: DMA slot timing, audio modulation and filter.
-5. Disk writes, extra drives, index pulses and accurate disk timing.
-6. Verify boot and software compatibility using authorized firmware and media.
+5. OCS custom chips: DMA slot timing, audio modulation and filter.
+6. Disk writes, extra drives, index pulses and accurate disk timing.
+7. Verify boot and software compatibility using authorized firmware and media.
 
 ## Hardware references
 
