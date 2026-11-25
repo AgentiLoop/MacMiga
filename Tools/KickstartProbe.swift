@@ -14,6 +14,8 @@ struct KickstartProbe {
         var hardDiskPath: String?
         var hardDiskOutput: String?
         var fastRAM = 0
+        var presses: [(frame: Int, key: UInt8)] = []
+        var fires: [Int] = []
         while paths.count >= 2, paths[0].hasPrefix("--") {
             if paths[0] == "--limit", let value = Int(paths[1]), value > 0 { limit = value }
             else if paths[0] == "--frames" { frameDirectory = paths[1] }
@@ -21,11 +23,13 @@ struct KickstartProbe {
             else if paths[0] == "--hdf" { hardDiskPath = paths[1] }
             else if paths[0] == "--hdf-out" { hardDiskOutput = paths[1] }
             else if paths[0] == "--fast", let value = Int(paths[1]), value >= 0 { fastRAM = value << 20 }
+            else if paths[0] == "--key", let (frame, key) = Self.keyPress(paths[1]) { presses.append((frame, key)) }
+            else if paths[0] == "--fire", let frame = Int(paths[1]) { fires.append(frame) }
             else { break }
             paths.removeFirst(2)
         }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--key FRAME:HEXCODE]... [--fire FRAME]... <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
@@ -40,9 +44,19 @@ struct KickstartProbe {
             print(String(format: "Reset: SSP=$%08X PC=$%08X", machine.cpu.supervisorStackPointer, machine.cpu.programCounter))
             var completed = 0
             do {
+                var frame = -1
                 for _ in 0..<limit {
                     try machine.step()
                     completed += 1
+                    guard machine.memory.video.frameCount != frame else { continue }
+                    // Scripted input: a key is held for 5 frames, the port-2 fire button for 10.
+                    frame = machine.memory.video.frameCount
+                    for press in presses {
+                        if press.frame == frame { machine.key(press.key, pressed: true) }
+                        if press.frame + 5 == frame { machine.key(press.key, pressed: false) }
+                    }
+                    if fires.contains(frame) { machine.joystick(Joystick(), fire: true) }
+                    if fires.contains(frame - 10) { machine.joystick(Joystick(), fire: false) }
                 }
                 print(String(format: "Stopped at the %d-instruction limit at PC=$%08X SR=$%04X; no boot success inferred.", limit, machine.cpu.programCounter, machine.cpu.statusRegister))
                 print(String(format: "Emulated %.2f s; stopped=%@ INTENA=$%04X INTREQ=$%04X DMACON=$%04X", Double(machine.clock) / Double(AmigaMachine.cpuClock), machine.cpu.isStopped ? "yes" : "no", machine.memory.custom.intena, machine.memory.custom.intreq, machine.memory.custom.dmacon))
@@ -75,6 +89,13 @@ struct KickstartProbe {
                 print("Last frame written to \(url.path)")
             }
         }
+    }
+
+    /// Parses `FRAME:HEXCODE`, e.g. `3000:59` for F10 at frame 3000.
+    static func keyPress(_ text: String) -> (Int, UInt8)? {
+        let parts = text.split(separator: ":")
+        guard parts.count == 2, let frame = Int(parts[0]), let key = UInt8(parts[1], radix: 16) else { return nil }
+        return (frame, key)
     }
 
     static func writePNG(_ video: Video, to url: URL) throws {
