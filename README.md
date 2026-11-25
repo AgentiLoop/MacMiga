@@ -40,7 +40,8 @@ Workbench disks has not been tested.
 floppy under Kickstart 3.1 and, with the contents of its Live CD on a hard disk
 image, comes up with its desktop (Wanderer): volume icons, a pointer that
 follows the mouse, windows that open on a double-click and pull-down menus.
-See "AROS".
+With AROS's own two ROM files in place of Kickstart the same desktop comes up,
+so no Commodore ROM or disk is needed. See "AROS".
 
 **Hard disk:** a hard disk image (`.hdf`) can be attached: either a hardfile
 (one AmigaDOS partition, mounted as `DH0`) or a partitioned image with a Rigid
@@ -77,8 +78,14 @@ probe").
 ## Run the app
 
 ```sh
-swift run -c release MacMiga path/to/kickstart.rom [disk.adf] [disk.hdf]
+swift run -c release MacMiga path/to/kickstart.rom [extended.rom] [disk.adf] [disk.hdf]
 ```
+
+A second ROM file, given right after the first, is an extended ROM for
+`$E00000` (AROS's ROM comes as two files; a Kickstart needs none). Machine ▸
+Open Extended ROM ($E00000)… adds one to the running machine and restarts it;
+opening a Kickstart ROM removes it again. Both are remembered for the next
+launch.
 
 The examples in this README keep the ROMs in a folder named `Kickstart ROMs`
 inside the repository. Git ignores ROM, ADF and HDF files, so they stay out of
@@ -167,6 +174,9 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
   64 KiB) for the host to read. Nothing is ever received; SERPER is ignored.
 - `$D80000`–`$DFEFFF` (RTC, A600 Gayle/IDE on other models) is empty on a stock
   A500 here: reads return 0 and writes are ignored.
+- `$E00000`–`$E7FFFF` is empty on an A500. `extendedROM:` fits a 512 KiB
+  read-only ROM there, the place where a 1 MiB ROM keeps its second half
+  (CDTV, CD32, and replacement systems such as AROS).
 - The `$F00000`–`$F7FFFF` diagnostic-cartridge slot is empty: reads return 0
   (never the `$1111` signature) and writes are ignored. Real hardware returns
   open-bus data there.
@@ -604,10 +614,44 @@ the background red, with `$8100000C` in a register (in exec's list of alerts
 that number is "memory list insane").
 
 Not tried: using the desktop by hand in the app window (the mouse there is
-captured by a click), starting programs from the desktop, the desktop with
-1 MiB chip RAM instead of fast RAM, the whole CD including `Developer`, and
-AROS's own ROM files in place of Kickstart (they need a second ROM area at
-`$E00000`; with them no Commodore ROM would be needed at all).
+captured by a click), starting programs from the desktop, and the whole CD
+including `Developer`.
+
+### AROS without a Kickstart ROM
+
+The Live CD also holds AROS's own ROM, as two 512 KiB files in `boot/amiga`:
+`aros-rom.bin` for `$F80000` and `aros-ext.bin` for `$E00000`. With them in
+place of Kickstart nothing from Commodore is needed:
+
+```sh
+swift run -c release MacMiga aros-rom.bin aros-ext.bin \
+    aros/*/bootdisk-amiga-m68k.adf aros-live.hdf
+```
+
+Turn on Machine ▸ 1 MB Chip RAM (and leave 8 MB Fast RAM off) for the quickest
+start. The boot floppy is still used: its script decides by the amount of free
+memory. Below 8 MiB it only opens the desktop; from 8 MiB on it runs the CD's
+whole startup, which on the first start builds font lists and writes them to
+the image.
+
+Checked on November 25, 2026 with the probe and the two ROM files of the
+2026-11-24 nightly build (`--ext` names the second one):
+
+| Machine and disks | Result |
+| --- | --- |
+| no disks, 8 MiB fast RAM | AROS's ROM started and showed its boot picture; its exec lists both ROM areas, and its boot log on the serial port says "1MiB ROM detected" |
+| floppy, 8 MiB fast RAM | the AROS shell, as with Kickstart |
+| floppy and CD image, 4 MiB fast RAM | the desktop by frame 5,000 (100 s), sooner than with Kickstart; 5,552 blocks read, none written. The pointer followed the mouse, two clicks opened the "AROS Live CD" window, and the right button brought down the menu |
+| floppy and CD image, 2 MiB fast RAM, or 1 MiB chip RAM and no fast RAM | the desktop, the same way |
+| floppy and CD image, stock memory | a requester: could not open "posixc.library" |
+| floppy and CD image, 8 MiB fast RAM | the CD's whole startup ran: 38,267 blocks read and 189 written (font lists), then the desktop with four icons, by frame 25,000 (500 s) |
+| the same with the image file read-only | the requester "Volume AROS Live CD is write protected" |
+| CD image alone, without the floppy, 8 MiB fast RAM | did not work. AROS booted from the image and ran the CD's startup with no screen open, then wrote through a null pointer (address 6, which destroys the pointer to exec at address 4) and crashed. It happened in the routine that moves the mouse pointer, right after the CD's pointer preference (PNG pointer images) was applied. With that one preference file left out of the image the desktop appeared, with AROS's own alert "Program failed … Wanderer … Illegal instruction". Whether a real 68000 Amiga does the same was not determined |
+
+In the app, started with the two ROMs, the floppy, the image (read-only),
+`-ChipRAM1MB YES` and `-Warp YES`, a capture of the window after 40 seconds
+showed the desktop. The Kickstart results above are unchanged (identical
+frames).
 
 ## Audio (Paula)
 
@@ -677,7 +721,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-The tests are in two places. `swift test` runs the 94 tests of the Amiga
+The tests are in two places. `swift test` runs the 95 tests of the Amiga
 machine in `Tests/MacMigaCoreTests`. `swift test --package-path Packages/M68K`
 runs the 74 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
 branch, logic/shift and decimal/MOVEP/CHK tests described below). Coverage includes
@@ -702,7 +746,8 @@ immediates and CCR/SR forms, single-operand instructions, NEG/NEGX flags,
 logic, multiply/divide (including overflow), every shift/rotate type, MOVEM,
 LINK/UNLK/PEA/Scc/status moves, CMPM, ADDX/SUBX chains, TRAP/RTE and the
 exception vectors. Memory tests cover chip-RAM mirrors, slow RAM, the custom
-chip mirror, and the empty autoconfig window. Machine tests cover power-on and
+chip mirror, the empty autoconfig window, and the extended ROM (mapped, read-only,
+kept over a reset, absent by default, wrong sizes refused). Machine tests cover power-on and
 reset through the ROM overlay, interrupt
 masking and stacking, STOP woken by VERTB with RTE, STOP privilege, CIA timer
 interrupts routed to INTREQ levels 2 and 6, and TOD driven by the beam. Video
@@ -752,7 +797,7 @@ These tests establish the implemented contract, not Amiga software compatibility
 ROMs remain user-supplied and ignored by Git. From the repository root:
 
 ```sh
-swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--ext EXTENDED.rom] [--fast MiB] [--chip 512|1024|2048] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
 ```
 
 `--hdf` attaches a hardfile as DH0 (the file itself is never modified;
@@ -770,7 +815,20 @@ for 5 frames; `--fire 2600` holds the port-2 fire button for 10 frames.
 also writes that frame, as `DIR/<rom name>-7000.png`.
 Whatever the software wrote to the serial port is printed, and `--trace N`
 executes N more instructions after the limit, printing the PC, the next three
-words and all registers before each.
+words and all registers before each. `--ext FILE` fits an extended ROM at
+`$E00000`. A hard disk image whose file is not writable is attached
+write-protected, as in the app.
+
+Three more options are for finding out why software crashes. `--wild N` stops
+when the PC leaves the 24-bit address space or enters the mirrors of chip RAM,
+and prints the last N instructions. `--exceptions FRAME` reports, from that
+frame on, each time the CPU takes one of the vectors 2 to 11 except 8 (bus
+error to line F; AROS uses the privilege violation to enter supervisor mode),
+with the instruction and the registers, up to 40 times; with `--wild N` the
+first report also lists the N instructions before it. `--watch FRAME:ADDRESS`
+reports, from that frame on, each change of the long word at a RAM address
+(hexadecimal), with the instruction during which it changed and the Blitter
+and disk pointers. The last two slow the run down.
 
 The probe stops at the first diagnostic or after `--limit` instructions
 (default 10,000); reaching
@@ -805,9 +863,10 @@ compatibility.
 
 ## Next milestones
 
-1. Desktop: start AROS from its own ROM files instead of Kickstart (needs the
-   second ROM area at `$E00000`), so that no Commodore ROM is required; use the
-   AROS desktop by hand in the app and fix what breaks.
+1. Desktop: find out why AROS fails when it boots from the Live CD image
+   without the floppy (see "AROS without a Kickstart ROM"); use the AROS
+   desktop by hand in the app and fix what breaks; fast RAM sizes other than
+   8 MB in the app.
 2. WHDLoad: try more installs and fix what breaks. Hard disk: load file
    systems stored in a partition table; try an image partitioned on an Amiga.
 3. CPU package: instruction timing; later a 68030/68040 with MMU and FPU for
