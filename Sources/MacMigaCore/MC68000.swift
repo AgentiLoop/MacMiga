@@ -67,6 +67,7 @@ public struct MC68000: Equatable, Sendable {
         do {
             try execute(memory: &memory)
         } catch let trap as Trap {
+            if let condition = trap.condition { status = (status & 0xFF00) | condition }
             try enterException(vector: trap.vector, returnAddress: trap.returnAddress, memory: &memory)
         }
     }
@@ -86,10 +87,12 @@ public struct MC68000: Equatable, Sendable {
         return true
     }
 
-    /// Pending exception raised by an instruction; CPU state is untouched when it is thrown.
+    /// Pending exception raised by an instruction; CPU state is untouched when it is thrown,
+    /// except that `condition`, if given, replaces the CCR before stacking (CHK sets N).
     private struct Trap: Error {
         let vector: Int
         let returnAddress: UInt32
+        var condition: UInt16? = nil
     }
 
     /// 68000 short exception frame: SR at SSP, return PC at SSP+2. Enters supervisor, clears trace.
@@ -268,6 +271,21 @@ public struct MC68000: Equatable, Sendable {
             try next.write(conditionHolds(Int((opcode >> 8) & 15)) ? 0xFF : 0, to: target, size: 1, memory: &memory)
             next.programCounter = cursor
             self = next
+        case _ where opcode & 0xB1F0 == 0x8100: // SBCD ($8), ABCD ($C): Dy,Dx or -(Ay),-(Ax)
+            var next = self
+            var cursor = nextWord
+            let size = 1, x = Int((opcode >> 9) & 7), y = Int(opcode & 7)
+            let memoryForm = opcode & 8 != 0
+            let sourceOperand = memoryForm
+                ? try next.moveOperand(mode: 4, register: y, size: size, cursor: &cursor, memory: &memory) : .data(y)
+            let source = try next.read(sourceOperand, size: size, memory: &memory)
+            let target = memoryForm
+                ? try next.moveOperand(mode: 4, register: x, size: size, cursor: &cursor, memory: &memory) : .data(x)
+            let destination = try next.read(target, size: size, memory: &memory)
+            let result = next.decimal(destination, source, subtract: opcode & 0x4000 == 0)
+            try next.write(result, to: target, size: size, memory: &memory)
+            next.programCounter = cursor
+            self = next
         case _ where opcode & 0xB000 == 0x8000, // OR/DIV ($8), AND/MUL/EXG ($C)
              _ where opcode & 0xF000 == 0xB000: // EOR (CMP opmodes matched above)
             var next = self
@@ -286,6 +304,40 @@ public struct MC68000: Equatable, Sendable {
         }
     }
 
+    /// BCD add/subtract with X for ABCD, SBCD and NBCD. C and X = decimal carry/borrow, Z cleared
+    /// if the result is nonzero (else unchanged); N and V follow the 68000's undocumented results.
+    private mutating func decimal(_ destination: UInt32, _ source: UInt32, subtract: Bool) -> UInt32 {
+        let x: UInt32 = status & 0x10 != 0 ? 1 : 0
+        var result: UInt32
+        var overflow: UInt32
+        let carry: Bool
+        if subtract {
+            result = (destination & 0x0F) &- (source & 0x0F) &- x
+            overflow = ~result
+            if result > 9 { result &-= 6 }
+            result = result &+ (destination & 0xF0) &- (source & 0xF0)
+            carry = result > 0x99
+            if carry { result &+= 0xA0 }
+            result &= 0xFF
+            overflow &= ~result
+        } else {
+            result = (destination & 0x0F) + (source & 0x0F) + x
+            overflow = ~result
+            if result > 9 { result += 6 }
+            result += (destination & 0xF0) + (source & 0xF0)
+            carry = result > 0x99
+            if carry { result -= 0xA0 }
+            overflow &= result
+            result &= 0xFF
+        }
+        status &= ~0x1B // keep Z
+        if carry { status |= 0x11 }
+        if result & 0x80 != 0 { status |= 0x08 }
+        if overflow & 0x80 != 0 { status |= 0x02 }
+        if result != 0 { status &= ~0x04 }
+        return result
+    }
+
     /// ORI/ANDI/SUBI/ADDI/EORI (including to CCR/SR) and BTST/BCHG/BCLR/BSET.
     private mutating func immediateOrBit(_ opcode: UInt16, memory: inout AmigaMemory) throws {
         let instructionAddress = programCounter
@@ -293,12 +345,32 @@ public struct MC68000: Equatable, Sendable {
         let mode = Int((opcode >> 3) & 7), register = Int(opcode & 7)
         var cursor = instructionAddress &+ 2
         let dynamic = opcode & 0x0100 != 0
+        if dynamic && mode == 1 { // MOVEP Dx,(d16,Ay) / (d16,Ay),Dx: alternate bytes, high first
+            let data = Int((opcode >> 9) & 7)
+            let base = self[address: register] &+ Self.signExtendWord(try extensionWord(cursor: &cursor, memory: &memory))
+            let count = opcode & 0x0040 != 0 ? 4 : 2
+            if opcode & 0x0080 != 0 {
+                let value = self[data: data]
+                for index in 0..<count {
+                    let byte = UInt8(truncatingIfNeeded: value >> UInt32((count - 1 - index) * 8))
+                    try memory.writeByte(byte, at: base &+ UInt32(index * 2))
+                }
+            } else {
+                var value: UInt32 = 0
+                for index in 0..<count {
+                    value = value << 8 | UInt32(try memory.readByte(at: base &+ UInt32(index * 2)))
+                }
+                self[data: data] = count == 4 ? value : (self[data: data] & 0xFFFF_0000) | value
+            }
+            programCounter = cursor
+            return
+        }
         if dynamic || opcode & 0x0F00 == 0x0800 {
             let operation = Int((opcode >> 6) & 3) // BTST, BCHG, BCLR, BSET
             let legal = operation == 0
                 ? mode != 1 && (mode != 7 || register <= (dynamic ? 4 : 3))
                 : Self.isDataAlterable(mode, register)
-            guard legal else { throw unsupported } // dynamic with An is MOVEP
+            guard legal else { throw unsupported }
             let number = dynamic
                 ? self[data: Int((opcode >> 9) & 7)]
                 : UInt32(try extensionWord(cursor: &cursor, memory: &memory) & 0xFF)
@@ -427,6 +499,21 @@ public struct MC68000: Equatable, Sendable {
             let stackPointer = self[address: 7] &- 4
             try memory.writeLong(address, at: stackPointer)
             self[address: 7] = stackPointer
+        case _ where opcode & 0xFFC0 == 0x4800: // NBCD <ea>
+            guard Self.isDataAlterable(mode, register) else { throw unsupported }
+            let target = try moveOperand(mode: mode, register: register, size: 1, cursor: &cursor, memory: &memory)
+            let value = try read(target, size: 1, memory: &memory)
+            try write(decimal(0, value, subtract: true), to: target, size: 1, memory: &memory)
+        case _ where opcode & 0xF1C0 == 0x4180: // CHK.W <ea>,Dn: trap 6 if Dn < 0 or Dn > bound
+            guard Self.isDataAddressing(mode, register) else { throw unsupported }
+            let source = try moveOperand(mode: mode, register: register, size: 2, cursor: &cursor, memory: &memory)
+            let bound = Int16(bitPattern: UInt16(try read(source, size: 2, memory: &memory)))
+            let value = Int16(bitPattern: UInt16(truncatingIfNeeded: self[data: Int((opcode >> 9) & 7)]))
+            status &= ~0x0F // Z, V, C undefined: cleared as Musashi/UAE do
+            if value < 0 || value > bound {
+                if value < 0 { status |= 0x08 }
+                throw Trap(vector: 6, returnAddress: cursor, condition: status & 0xFF)
+            }
         case _ where opcode & 0xFB80 == 0x4880: // MOVEM
             try moveMultiple(opcode, cursor: &cursor, memory: &memory)
         case _ where opcode & 0xFFC0 == 0x40C0: // MOVE SR,<ea> (unprivileged on the 68000)
@@ -524,7 +611,6 @@ public struct MC68000: Equatable, Sendable {
     }
 
     /// OR ($8), EOR/CMPM ($B, opmodes 4–6), AND ($C), MULU/MULS, DIVU/DIVS and EXG.
-    /// ABCD/SBCD encodings are rejected.
     private mutating func logical(_ opcode: UInt16, memory: inout AmigaMemory) throws {
         let unsupported = CPUError.unsupportedInstruction(opcode: opcode, address: programCounter)
         let mode = Int((opcode >> 3) & 7), register = Int(opcode & 7)

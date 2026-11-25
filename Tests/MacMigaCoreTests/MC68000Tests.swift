@@ -177,7 +177,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
 
 @Test func unsupportedOpcodesDoNotSilentlyExecuteOrChangeCPU() throws {
     var memory = try cpuMemory([])
-    for opcode: UInt16 in [0x7100, 0x7FFF, 0x0108, 0x4180, 0xC101, 0x8101, 0xC300] {
+    for opcode: UInt16 in [0x7100, 0x7FFF, 0x4188, 0x4808, 0x483C] {
         try memory.writeWord(opcode, at: 0x100)
         var cpu = MC68000()
         cpu.programCounter = 0x100
