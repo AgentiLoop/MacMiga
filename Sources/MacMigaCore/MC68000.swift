@@ -135,6 +135,22 @@ public struct MC68000: Equatable, Sendable {
             var next = self
             try next.arithmetic(opcode, memory: &memory)
             self = next
+        case _ where opcode & 0xF0F8 == 0x50C8: // DBcc Dn,<label>
+            let displacement = Self.signExtendWord(try memory.readWord(at: nextWord))
+            if conditionHolds(Int((opcode >> 8) & 15)) {
+                programCounter = nextWord &+ 2
+            } else {
+                // Only the low word of Dn counts; the loop ends when it reaches -1.
+                let register = Int(opcode & 7)
+                let counter = UInt16(truncatingIfNeeded: dataRegisters[register]) &- 1
+                dataRegisters[register] = (dataRegisters[register] & 0xFFFF_0000) | UInt32(counter)
+                programCounter = counter == 0xFFFF ? nextWord &+ 2 : nextWord &+ displacement
+            }
+        case _ where opcode & 0xF000 == 0xB000 && [0, 1, 2, 3, 7].contains((opcode >> 6) & 7),
+             _ where opcode & 0xFF00 == 0x0C00 && opcode & 0x00C0 != 0x00C0: // CMP / CMPA / CMPI
+            var next = self
+            try next.compare(opcode, memory: &memory)
+            self = next
         default:
             throw CPUError.unsupportedInstruction(opcode: opcode, address: instructionAddress)
         }
@@ -142,6 +158,59 @@ public struct MC68000: Equatable, Sendable {
 
     private enum MoveOperand {
         case data(Int), address(Int), memory(UInt32), immediate(UInt32)
+    }
+
+    /// CMP <ea>,Dn; CMPA <ea>,An; CMPI #imm,<ea>. Sets NZVC from destination - source; X is unchanged.
+    private mutating func compare(_ opcode: UInt16, memory: inout AmigaMemory) throws {
+        let mode = Int((opcode >> 3) & 7)
+        let register = Int(opcode & 7)
+        let immediateForm = opcode & 0xF000 == 0x0000
+        let opmode = Int((opcode >> 6) & 7)
+        let size: Int
+        let legal: Bool
+        if immediateForm {
+            size = [1, 2, 4][opmode & 3]
+            legal = mode != 1 && (mode != 7 || register <= 1) // data alterable
+        } else {
+            size = opmode == 3 ? 2 : opmode == 7 ? 4 : [1, 2, 4][opmode]
+            legal = (mode != 7 || register <= 4) && !(mode == 1 && size == 1)
+        }
+        guard legal else {
+            throw CPUError.unsupportedInstruction(opcode: opcode, address: programCounter)
+        }
+
+        var cursor = programCounter &+ 2
+        var bits = size * 8
+        var source: UInt32
+        let destination: UInt32
+        if immediateForm {
+            let high = try extensionWord(cursor: &cursor, memory: memory)
+            source = size == 1 ? UInt32(high & 0xFF) : UInt32(high)
+            if size == 4 { source = source << 16 | UInt32(try extensionWord(cursor: &cursor, memory: memory)) }
+            let operand = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
+            destination = try read(operand, size: size, memory: memory)
+        } else {
+            let operand = try moveOperand(mode: mode, register: register, size: size, cursor: &cursor, memory: memory)
+            source = try read(operand, size: size, memory: memory)
+            let upper = Int((opcode >> 9) & 7)
+            if opmode == 3 || opmode == 7 { // CMPA compares all 32 bits of An
+                if size == 2 { source = Self.signExtendWord(UInt16(source)) }
+                destination = self[address: upper]
+                bits = 32
+            } else {
+                destination = self[data: upper] & (size == 4 ? 0xFFFF_FFFF : (UInt32(1) << bits) - 1)
+            }
+        }
+
+        let mask: UInt32 = bits == 32 ? 0xFFFF_FFFF : (UInt32(1) << bits) - 1
+        let sign = UInt32(1) << (bits - 1)
+        let result = (destination &- source) & mask
+        status &= 0xFFF0
+        if source > destination { status |= 0x01 }
+        if (source ^ destination) & (destination ^ result) & sign != 0 { status |= 0x02 }
+        if result == 0 { status |= 0x04 }
+        if result & sign != 0 { status |= 0x08 }
+        programCounter = cursor
     }
 
     /// ADD, ADDA, ADDQ, SUB, SUBA and SUBQ. ADDX/SUBX encodings are rejected.
@@ -365,6 +434,8 @@ public struct MC68000: Equatable, Sendable {
         let zero = status & 4 != 0
         let negative = status & 8 != 0
         switch condition {
+        case 0: return true // T
+        case 1: return false // F
         case 2: return !carry && !zero // HI
         case 3: return carry || zero // LS
         case 4: return !carry // CC
@@ -379,7 +450,7 @@ public struct MC68000: Equatable, Sendable {
         case 13: return negative != overflow // LT
         case 14: return !zero && negative == overflow // GT
         case 15: return zero || negative != overflow // LE
-        default: preconditionFailure("Expected a Bcc condition in 2...15")
+        default: preconditionFailure("Expected a condition code in 0...15")
         }
     }
 }
