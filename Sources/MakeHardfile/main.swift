@@ -7,9 +7,11 @@ var name: String?
 var freeBytes: Int?
 var startup: String?
 var list = false
+var extract = false
 while let first = arguments.first, first.hasPrefix("--") {
     arguments.removeFirst()
     if first == "--list" { list = true }
+    else if first == "--extract" { extract = true }
     else if first == "--name", !arguments.isEmpty { name = arguments.removeFirst() }
     else if first == "--startup", !arguments.isEmpty { // each use adds a line
         startup = (startup.map { $0 + "\n" } ?? "") + arguments.removeFirst()
@@ -19,10 +21,11 @@ while let first = arguments.first, first.hasPrefix("--") {
         arguments.removeFirst()
     } else { arguments = [] }
 }
-guard list ? arguments.count == 1 : arguments.count >= 2 else {
+guard list ? arguments.count == 1 : extract ? arguments.count == 2 : arguments.count >= 2 else {
     print("""
     Usage: MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... <folder | archive.lha>... <output.hdf>
            MakeHardfile --list <folder | archive.lha>
+           MakeHardfile --extract <archive.lha> <new folder>
     """)
     exit(2)
 }
@@ -36,6 +39,20 @@ do {
             print(size.padding(toLength: 10, withPad: " ", startingAt: 0) + entry.path.joined(separator: "/"))
         }
         print("\(entries.count) entries, \(entries.reduce(0) { $0 + ($1.contents?.count ?? 0) }) bytes")
+    } else if extract {
+        // Unpacks the archive into a folder on the Mac, for example to get at an ADF inside it.
+        let folder = URL(fileURLWithPath: output)
+        let entries = try VolumeEntry.entries(of: source)
+        for entry in entries {
+            let url = entry.path.reduce(folder) { $0.appendingPathComponent($1) }
+            if let contents = entry.contents {
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data(contents).write(to: url)
+            } else {
+                try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            }
+        }
+        print("\(output): \(entries.count) entries")
     } else {
         let sources = arguments.dropLast().map { URL(fileURLWithPath: $0) }
         let image = try FastFileSystem.hardfile(from: sources, name: name, freeBytes: freeBytes, startupSequence: startup)

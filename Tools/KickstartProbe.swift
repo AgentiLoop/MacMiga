@@ -15,6 +15,7 @@ struct KickstartProbe {
         var hardDiskOutput: String?
         var fastRAM = 0
         var chipRAM = 512 * 1024
+        var trace = 0
         var presses: [(frame: Int, key: UInt8)] = []
         var fires: [Int] = []
         while paths.count >= 2, paths[0].hasPrefix("--") {
@@ -24,6 +25,7 @@ struct KickstartProbe {
             else if paths[0] == "--hdf" { hardDiskPath = paths[1] }
             else if paths[0] == "--hdf-out" { hardDiskOutput = paths[1] }
             else if paths[0] == "--fast", let value = Int(paths[1]), value >= 0 { fastRAM = value << 20 }
+            else if paths[0] == "--trace", let value = Int(paths[1]), value >= 0 { trace = value }
             else if paths[0] == "--chip", let value = Int(paths[1]), [512, 1024, 2048].contains(value) { chipRAM = value << 10 }
             else if paths[0] == "--key", let (frame, key) = Self.keyPress(paths[1]) { presses.append((frame, key)) }
             else if paths[0] == "--fire", let frame = Int(paths[1]) { fires.append(frame) }
@@ -31,7 +33,7 @@ struct KickstartProbe {
             paths.removeFirst(2)
         }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--key FRAME:HEXCODE]... [--fire FRAME]... <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--trace N] [--key FRAME:HEXCODE]... [--fire FRAME]... <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
@@ -70,10 +72,23 @@ struct KickstartProbe {
                 print("Diagnostic: \(error)")
             }
             print("Frames completed: \(machine.memory.video.frameCount)")
+            for _ in 0..<trace {
+                let pc = machine.cpu.programCounter
+                let words = (0..<3).map { String(format: "%04X", (try? machine.memory.readWord(at: pc &+ UInt32($0 * 2))) ?? 0) }
+                let data = (0..<8).map { String(format: "%08X", machine.cpu[data: $0]) }.joined(separator: " ")
+                let address = (0..<8).map { String(format: "%08X", machine.cpu[address: $0]) }.joined(separator: " ")
+                print(String(format: "$%06X: %@  SR=%04X D: %@ A: %@", pc & 0xFF_FFFF, words.joined(separator: " "),
+                             machine.cpu.statusRegister, data, address))
+                do { try machine.step() } catch { print("Diagnostic: \(error)"); break }
+            }
             let custom = machine.memory.custom
             print(String(format: "BPLCON0=$%04X DIW=$%04X-$%04X DDF=$%04X-$%04X", custom.register(0x100), custom.register(0x08E), custom.register(0x090), custom.register(0x092), custom.register(0x094)))
             print("COLOR00-07: " + (0..<8).map { String(format: "$%03X", custom.register(0x180 + $0 * 2)) }.joined(separator: " "))
             for line in systemReport(&machine.memory) { print(line) }
+            if !custom.serialOutput.isEmpty {
+                print("Serial output (\(custom.serialOutput.count) bytes):")
+                print(String(String.UnicodeScalarView(custom.serialOutput.map { Unicode.Scalar($0) })))
+            }
             let boards = machine.memory.expansion.boards.map { board in
                 "\(board.kind) " + (board.base.map { String(format: "at $%06X", $0) } ?? "not configured")
             }
