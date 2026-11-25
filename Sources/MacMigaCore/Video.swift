@@ -78,6 +78,7 @@ extension AmigaMemory {
             }
             if custom.dmacon & 0x0280 == 0x0280 { stepCopper() }
             if custom.blitPending { runPendingBlit() }
+            if custom.diskDMAPending { runPendingDiskDMA() }
             let line = custom.verticalPosition
             let (lineEnded, frameEnded) = custom.stepBeam()
             if lineEnded {

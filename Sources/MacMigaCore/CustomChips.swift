@@ -11,6 +11,7 @@ public struct CustomChips: Equatable, Sendable {
         public static let potgor = 0x016, serdatr = 0x018, dskbytr = 0x01A
         public static let intenar = 0x01C, intreqr = 0x01E
         public static let dmacon = 0x096, intena = 0x09A, intreq = 0x09C, adkcon = 0x09E
+        public static let dskpth = 0x020, dsklen = 0x024, dsksync = 0x07E
         public static let copcon = 0x02E, cop1lch = 0x080, cop2lch = 0x084
         public static let copjmp1 = 0x088, copjmp2 = 0x08A
         public static let diwstrt = 0x08E, diwstop = 0x090, ddfstrt = 0x092, ddfstop = 0x094
@@ -44,6 +45,12 @@ public struct CustomChips: Equatable, Sendable {
     public internal(set) var blitPending = false
     /// DMACONR BZERO: the last blit produced only zero D data.
     var blitterZero = false
+    /// Disk DMA pointer DSKPT.
+    public internal(set) var diskPointer: UInt32 = 0
+    /// DSKLEN was written once with DMAEN; a second such write starts the transfer.
+    private var diskLengthArmed = false
+    /// Set when a disk transfer has been started and not yet run.
+    public internal(set) var diskDMAPending = false
 
     public init() {}
 
@@ -83,6 +90,20 @@ public struct CustomChips: Equatable, Sendable {
         case Register.copjmp1: copperJump = 1
         case Register.copjmp2: copperJump = 2
         case Register.bltsize: blitPending = true
+        case Register.dskpth, Register.dskpth + 2:
+            diskPointer = register & 2 == 0
+                ? (diskPointer & 0xFFFF) | UInt32(value & 0x001F) << 16
+                : (diskPointer & 0x1F_0000) | UInt32(value & 0xFFFE)
+        case Register.dsklen:
+            if value & 0x8000 == 0 {
+                diskLengthArmed = false
+                diskDMAPending = false
+            } else if diskLengthArmed {
+                diskLengthArmed = false
+                diskDMAPending = true
+            } else {
+                diskLengthArmed = true
+            }
         case Register.bltcpth...(Register.bltcpth + 0xE):
             let channel = (register - Register.bltcpth) >> 2
             let pointer = blitterPointers[channel]

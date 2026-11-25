@@ -9,19 +9,25 @@ struct KickstartProbe {
         var paths = Array(CommandLine.arguments.dropFirst())
         var limit = 10_000
         var frameDirectory: String?
+        var adfPath: String?
         while paths.count >= 2, paths[0].hasPrefix("--") {
             if paths[0] == "--limit", let value = Int(paths[1]), value > 0 { limit = value }
             else if paths[0] == "--frames" { frameDirectory = paths[1] }
+            else if paths[0] == "--adf" { adfPath = paths[1] }
             else { break }
             paths.removeFirst(2)
         }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe [--limit N] [--frames DIR] <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
             let bytes = try Data(contentsOf: URL(fileURLWithPath: path))
             var machine = try AmigaMachine(kickstart: Array(bytes))
+            if let adfPath {
+                try machine.memory.insertDisk(adf: Array(try Data(contentsOf: URL(fileURLWithPath: adfPath))))
+                print("DF0: \(URL(fileURLWithPath: adfPath).lastPathComponent)")
+            }
             print("\(URL(fileURLWithPath: path).lastPathComponent): \(bytes.count) bytes")
             print(String(format: "Reset: SSP=$%08X PC=$%08X", machine.cpu.supervisorStackPointer, machine.cpu.programCounter))
             var completed = 0

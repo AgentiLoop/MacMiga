@@ -29,7 +29,7 @@ public struct AmigaMemory {
     public var copper = Copper()
     public var video = Video()
     /// Internal floppy drive DF0, controlled through CIA-B port B.
-    public private(set) var drive = FloppyDrive()
+    public internal(set) var drive = FloppyDrive()
 
     /// ROM overlay follows CIA-A PA0 (OVL). The line is pulled up, so it is active
     /// while PA0 is still an input after reset.
@@ -46,6 +46,12 @@ public struct AmigaMemory {
         precondition(slowRAMSize >= 0 && slowRAMSize <= 0x18_0000 && slowRAMSize % 0x4_0000 == 0)
         self.kickstart = kickstart
         self.slowRAM = [UInt8](repeating: 0, count: slowRAMSize)
+        updateDrive()
+    }
+
+    /// Inserts an ADF image into DF0 (nil ejects). /CHNG stays low until the next step.
+    public mutating func insertDisk(adf: [UInt8]?) throws {
+        if let adf { try drive.insert(adf: adf) } else { drive.eject() }
         updateDrive()
     }
 
@@ -68,7 +74,7 @@ public struct AmigaMemory {
         ciaB = CIA8520()
         custom = CustomChips()
         copper = Copper()
-        drive = FloppyDrive()
+        drive = FloppyDrive(disk: drive.disk) // a reset does not eject the disk
         updateDrive()
         return try ResetVectors(
             supervisorStackPointer: readLong(at: 0),
