@@ -1,10 +1,12 @@
 import AppKit
 import AVFoundation
+import GameController
 import MacMigaCore
 import UniformTypeIdentifiers
 
 /// MacMiga app: one window showing the emulated PAL display, driven at 50 frames per second
-/// on the main thread. Keyboard and mouse events inside the window go to the Amiga.
+/// on the main thread. Keyboard, mouse (captured by a click, released with ⌘) and joystick
+/// (numeric keypad, right Option, optionally the arrow keys, or a game controller) go to the Amiga.
 @MainActor
 final class Emulator {
     private(set) var machine: AmigaMachine?
@@ -63,6 +65,8 @@ final class Emulator {
     func mouse(dx: Int, dy: Int, left: Bool, right: Bool) {
         machine?.mouse(dx: dx, dy: dy, left: left, right: right)
     }
+
+    func joystick(_ state: Joystick, fire: Bool) { machine?.joystick(state, fire: fire) }
 }
 
 /// Thread-safe FIFO of interleaved stereo samples between the emulator (main thread) and
@@ -147,6 +151,49 @@ final class DisplayView: NSView {
     private var left = false, right = false
     private var modifiersDown = Set<UInt16>()
 
+    // MARK: Joystick (port 2)
+
+    /// Numeric keypad 8/2/4/6 (7/9/1/3 diagonals) steer and 0/5/Enter fire; right Option also
+    /// fires. With `cursorKeysAsJoystick` the arrow keys steer instead of typing cursor keys.
+    var cursorKeysAsJoystick = UserDefaults.standard.bool(forKey: "CursorKeysJoystick")
+    private var keyBits: UInt8 = 0          // 0 up, 1 down, 2 left, 3 right, 4 fire
+    private var rightOptionFire = false
+    static let joystickKeys: [UInt16: UInt8] = [91: 0x01, 84: 0x02, 86: 0x04, 88: 0x08, 82: 0x10, 87: 0x10,
+                                               76: 0x10, 89: 0x05, 92: 0x09, 83: 0x06, 85: 0x0A]
+    static let cursorJoystick: [UInt16: UInt8] = [126: 0x01, 125: 0x02, 123: 0x04, 124: 0x08]
+
+    /// Combines keyboard and game-controller state and sends it to the joystick in port 2.
+    func updateJoystick() {
+        var bits = keyBits | (rightOptionFire ? 0x10 : 0)
+        for pad in GCController.controllers() {
+            if let gp = pad.extendedGamepad {
+                if gp.dpad.up.isPressed || gp.leftThumbstick.yAxis.value > 0.5 { bits |= 0x01 }
+                if gp.dpad.down.isPressed || gp.leftThumbstick.yAxis.value < -0.5 { bits |= 0x02 }
+                if gp.dpad.left.isPressed || gp.leftThumbstick.xAxis.value < -0.5 { bits |= 0x04 }
+                if gp.dpad.right.isPressed || gp.leftThumbstick.xAxis.value > 0.5 { bits |= 0x08 }
+                if gp.buttonA.isPressed || gp.buttonB.isPressed || gp.rightTrigger.isPressed { bits |= 0x10 }
+            } else if let mg = pad.microGamepad {
+                if mg.dpad.up.isPressed { bits |= 0x01 }
+                if mg.dpad.down.isPressed { bits |= 0x02 }
+                if mg.dpad.left.isPressed { bits |= 0x04 }
+                if mg.dpad.right.isPressed { bits |= 0x08 }
+                if mg.buttonA.isPressed || mg.buttonX.isPressed { bits |= 0x10 }
+            }
+        }
+        var state = Joystick()
+        state.up = bits & 0x01 != 0; state.down = bits & 0x02 != 0
+        state.left = bits & 0x04 != 0; state.right = bits & 0x08 != 0
+        emulator?.joystick(state, fire: bits & 0x10 != 0)
+    }
+
+    /// Releases every joystick input (used when the window loses focus).
+    func releaseJoystick() { keyBits = 0; rightOptionFire = false; updateJoystick() }
+
+    private func joystickBits(for keyCode: UInt16) -> UInt8? {
+        if let bits = DisplayView.joystickKeys[keyCode] { return bits }
+        return cursorKeysAsJoystick ? DisplayView.cursorJoystick[keyCode] : nil
+    }
+
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
 
@@ -183,33 +230,83 @@ final class DisplayView: NSView {
 
     override func keyDown(with event: NSEvent) {
         if event.modifierFlags.contains(.command) { super.keyDown(with: event); return }
+        if let bits = joystickBits(for: event.keyCode) { keyBits |= bits; updateJoystick(); return }
         guard !event.isARepeat, let code = amigaKeys[event.keyCode] else { return }
         emulator?.key(code, pressed: true)
     }
 
     override func keyUp(with event: NSEvent) {
+        if let bits = joystickBits(for: event.keyCode) { keyBits &= ~bits; updateJoystick(); return }
         if let code = amigaKeys[event.keyCode] { emulator?.key(code, pressed: false) }
     }
 
     override func flagsChanged(with event: NSEvent) {
+        if mouseCaptured && event.modifierFlags.contains(.command) { releaseMouse() } // ⌘ gives the pointer back
+        if event.keyCode == 61 {                                   // right Option = joystick fire
+            rightOptionFire = event.modifierFlags.rawValue & 0x40 != 0
+            updateJoystick()
+            return
+        }
         guard let code = amigaKeys[event.keyCode] else { return }
         let pressed = !modifiersDown.contains(event.keyCode)
         if pressed { modifiersDown.insert(event.keyCode) } else { modifiersDown.remove(event.keyCode) }
         emulator?.key(code, pressed: pressed)
     }
 
-    private func sendMouse(_ event: NSEvent?) {
-        let dx = Int((event?.deltaX ?? 0).rounded()), dy = Int((event?.deltaY ?? 0).rounded())
+    // MARK: Mouse (port 1)
+
+    /// A click in the window captures the Mac pointer (hidden, detached from the screen) so
+    /// the Amiga pointer is the only one and follows every movement; ⌘ releases it.
+    private(set) var mouseCaptured = false
+    private var remainder = (x: 0.0, y: 0.0)
+
+    private func captureMouse() {
+        guard !mouseCaptured, window != nil else { return }
+        mouseCaptured = true
+        remainder = (0, 0)
+        NSCursor.hide()
+        CGAssociateMouseAndMouseCursorPosition(0)
+        onMouseCaptureChange?()
+    }
+
+    func releaseMouse() {
+        guard mouseCaptured else { return }
+        mouseCaptured = false
+        CGAssociateMouseAndMouseCursorPosition(1)
+        NSCursor.unhide()
+        left = false; right = false
+        sendMouse(dx: 0, dy: 0)
+        onMouseCaptureChange?()
+    }
+
+    var onMouseCaptureChange: (() -> Void)?
+
+    private func sendMouse(dx: Int, dy: Int) {
         emulator?.mouse(dx: dx, dy: dy, left: left, right: right)
     }
 
-    override func mouseMoved(with event: NSEvent) { sendMouse(event) }
-    override func mouseDragged(with event: NSEvent) { sendMouse(event) }
-    override func rightMouseDragged(with event: NSEvent) { sendMouse(event) }
-    override func mouseDown(with event: NSEvent) { left = true; sendMouse(nil) }
-    override func mouseUp(with event: NSEvent) { left = false; sendMouse(nil) }
-    override func rightMouseDown(with event: NSEvent) { right = true; sendMouse(nil) }
-    override func rightMouseUp(with event: NSEvent) { right = false; sendMouse(nil) }
+    /// One mouse count moves the Amiga pointer one lowres pixel, which is two display pixels
+    /// of the 736-pixel-wide view, so scale by the view size to keep pointer speed 1:1.
+    private func moveMouse(_ event: NSEvent) {
+        guard mouseCaptured else { return }
+        remainder.x += Double(event.deltaX) * Double(Video.width) / (2 * bounds.width)
+        remainder.y += Double(event.deltaY) * Double(Video.height) / bounds.height
+        let dx = Int(remainder.x.rounded(.towardZero)), dy = Int(remainder.y.rounded(.towardZero))
+        guard dx != 0 || dy != 0 else { return }
+        remainder.x -= Double(dx); remainder.y -= Double(dy)
+        sendMouse(dx: dx, dy: dy)
+    }
+
+    override func mouseMoved(with event: NSEvent) { moveMouse(event) }
+    override func mouseDragged(with event: NSEvent) { moveMouse(event) }
+    override func rightMouseDragged(with event: NSEvent) { moveMouse(event) }
+    override func mouseDown(with event: NSEvent) {
+        if !mouseCaptured { captureMouse(); return }        // the capturing click is not an Amiga click
+        left = true; sendMouse(dx: 0, dy: 0)
+    }
+    override func mouseUp(with event: NSEvent) { if mouseCaptured { left = false; sendMouse(dx: 0, dy: 0) } }
+    override func rightMouseDown(with event: NSEvent) { if mouseCaptured { right = true; sendMouse(dx: 0, dy: 0) } }
+    override func rightMouseUp(with event: NSEvent) { if mouseCaptured { right = false; sendMouse(dx: 0, dy: 0) } }
 }
 
 @MainActor
@@ -232,6 +329,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeFirstResponder(view)
         window.acceptsMouseMovedEvents = true
         NSApp.activate(ignoringOtherApps: true)
+        view.onMouseCaptureChange = { [weak self] in self?.updateTitle() }
+        NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window,
+                                               queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.view.releaseMouse(); self?.view.releaseJoystick() }
+        }
+        observeControllers()
 
         let arguments = Array(CommandLine.arguments.dropFirst())
         let romPath = arguments.first { !$0.lowercased().hasSuffix(".adf") }
@@ -256,7 +359,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateTitle() {
         let rom = emulator.romURL?.lastPathComponent ?? "no Kickstart"
         let disk = emulator.diskURL?.lastPathComponent ?? "empty"
-        window.title = "MacMiga — \(rom) — DF0: \(disk)"
+        let hint = view.mouseCaptured ? " — ⌘ releases the mouse" : ""
+        window.title = "MacMiga — \(rom) — DF0: \(disk)\(hint)"
+    }
+
+    /// Game controllers report changes on the main queue; connect/disconnect refreshes port 2.
+    private func observeControllers() {
+        let attach: @MainActor @Sendable (GCController) -> Void = { [weak self] pad in
+            pad.handlerQueue = .main
+            let changed = { MainActor.assumeIsolated { self?.view.updateJoystick() } }
+            pad.extendedGamepad?.valueChangedHandler = { _, _ in changed() }
+            pad.microGamepad?.valueChangedHandler = { _, _ in changed() }
+        }
+        GCController.controllers().forEach(attach)
+        for name in [Notification.Name.GCControllerDidConnect, .GCControllerDidDisconnect] {
+            NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    GCController.controllers().forEach(attach)
+                    self?.view.updateJoystick()
+                }
+            }
+        }
+    }
+
+    @objc func toggleCursorJoystick(_ sender: NSMenuItem) {
+        view.cursorKeysAsJoystick.toggle()
+        view.releaseJoystick()
+        UserDefaults.standard.set(view.cursorKeysAsJoystick, forKey: "CursorKeysJoystick")
+        sender.state = view.cursorKeysAsJoystick ? .on : .off
     }
 
     private func alert(_ message: String) {
@@ -269,6 +399,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func open(rom url: URL) {
         do { try emulator.load(rom: url) } catch { alert("Could not load \(url.lastPathComponent): \(error)") }
+        view.updateJoystick()
         updateTitle()
     }
 
@@ -288,6 +419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func ejectDisk() { emulator.eject(); updateTitle() }
     @objc func resetMachine() {
         do { try emulator.reset() } catch { alert("Reset failed: \(error)") }
+        view.updateJoystick()
         updateTitle()
     }
 
@@ -304,6 +436,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         machine.addItem(withTitle: "Eject Disk", action: #selector(ejectDisk), keyEquivalent: "e")
         machine.addItem(.separator())
         machine.addItem(withTitle: "Reset", action: #selector(resetMachine), keyEquivalent: "r")
+        machine.addItem(.separator())
+        let cursor = machine.addItem(withTitle: "Arrow Keys Control Joystick (Port 2)",
+                                     action: #selector(toggleCursorJoystick(_:)), keyEquivalent: "j")
+        cursor.state = view.cursorKeysAsJoystick ? .on : .off
         machine.items.forEach { $0.target = self }
         machineItem.submenu = machine
         main.addItem(machineItem)
