@@ -45,7 +45,9 @@ so no Commodore ROM or disk is needed. See "AROS".
 
 **Hard disk:** a hard disk image (`.hdf`) can be attached: either a hardfile
 (one AmigaDOS partition, mounted as `DH0`) or a partitioned image with a Rigid
-Disk Block, whose partitions are all mounted under their own names. Kickstart 3.1 and 1.3 both boot from it and run its
+Disk Block, whose partitions are all mounted under their own names. A file
+system stored in the partition table, such as PFS3, is loaded for its
+partitions. Kickstart 3.1 and 1.3 both boot from it and run its
 `S/Startup-Sequence`; see "Expansion boards and hard disk" below. A hardfile
 can be made from a Mac folder or an LHA archive (see "Making a hard disk"); a
 game made that way from an LHA archive started from the hard disk under
@@ -493,15 +495,16 @@ without a registered maker):
   and the BootPoint starts dos.library. A bootable floppy in DF0 has the higher
   priority (5) and should still boot first; that was not tried.
 
-The 68000 code in the boot ROM is about 90 instructions. The work is done by
-the host through three long-word registers on the board: `$8000` takes an
+The 68000 code in the boot ROM is about 180 instructions. The work is done by
+the host through long-word registers on the board: `$8000` takes an
 IORequest pointer and performs the command at once (CMD_READ, CMD_WRITE,
 TD_FORMAT, TD_PROTSTATUS, TD_GETNUMTRACKS, TD_GETGEOMETRY; motor, seek, update,
 clear and change-state commands succeed with nothing to do; TD_ADDCHANGEINT is
 kept unanswered; anything else, including HD_SCSICMD and 64-bit commands,
 returns IOERR_NOCMD), `$8004` fixes up the Resident tag in the DiagArea copy,
-and `$8008` fills in the device's library node. The controller only touches
-memory, never CPU registers.
+`$8008` fills in the device's library node, and `$8040` onwards load the file
+systems of a partition table (see "File systems in the partition table"). The
+controller only touches memory, never CPU registers.
 
 `HardDisk` holds the image in one of two forms. A hardfile is one AmigaDOS
 partition with no partition table, at
@@ -542,10 +545,7 @@ and sectors from the Rigid Disk Block.
 Rejected with an error: a table or partition block with a bad checksum or ID,
 a chain that loops or leaves the image, a block size other than 512 bytes, a
 partition that extends past the end of the image, and a table with nothing to
-mount. Not supported: file systems stored on the disk (`FSHD`/`LSEG` blocks)
-are not loaded, so a partition needs a file system Kickstart has in ROM (with
-any other DosType AmigaDOS will show it as not a DOS disk); bad-block lists
-and drive-init code are ignored.
+mount. Bad-block lists and drive-init code are ignored.
 
 Checked on November 25, 2026 with the probe. The images were made by a script
 (not committed) that puts volumes from `MakeHardfile` behind a Rigid Disk Block
@@ -563,7 +563,59 @@ program was at hand.
 The frames from hardfiles (a Kickstart 3.1 shell boot, WHDLoad with Pac-Man,
 and the Kickstart 1.3 boot) are identical to those before this change. Whether
 Kickstart 1.3 also mounts the partition it did not boot from was not checked.
-A partitioned image has not been attached in the app.
+
+### File systems in the partition table
+
+A partition table can carry file systems: a header block (`FSHD`) with the
+partition type (DosType) it serves, a version and the values for the DOS
+device node, and the program itself in a chain of `LSEG` blocks. That is how a
+drive brings along a file system Kickstart does not have in ROM, for example
+PFS3 or SFS, or the Fast File System for Kickstart 1.3. MacMiga installs them
+the way a real controller's ROM does:
+
+- `HardDisk` reads the headers and their programs. The program is an AmigaDOS
+  load file ("hunks"); `HunkFile` reads code, data and BSS hunks and 32-bit
+  relocations in the long and the short form, and skips symbol, debug and name
+  blocks. Overlays are not read.
+- The boot ROM opens `FileSystem.resource`, or makes it if Kickstart has none.
+  For each file system of the table it looks for an entry of the same DosType.
+  Unless the resource has one in the same or a newer version, the ROM allocates
+  memory (one block for all hunks), the host puts the relocated program there
+  as a segment list, and the ROM adds a FileSysEntry to the resource.
+- For each partition whose DosType has a file system in the table, the ROM
+  takes the newest entry of that type from the resource and patches the
+  partition's device node as the entry's patch flags say (usually the segment
+  list and a global vector of -1). So if Kickstart's own file system of that
+  type is as new as the table's, Kickstart's is used.
+- Partitions of a type the table has no file system for are left to Kickstart,
+  exactly as before.
+
+A header block with a bad checksum or ID ends the list at that point; the
+disk stays usable. A file system whose `LSEG` blocks are damaged, or whose
+program is not a load file `HunkFile` reads, is listed but not installed, and
+its partitions are left to Kickstart. At most 16 file systems are installed.
+
+Checked on November 25, 2026 with PFS3 (pfs3aio 3.1 from Aminet, version 19.2
+of the handler, one hunk of 58,240 bytes with 207 relocations). No Amiga-made
+partition table was at hand: a script (not committed) wrote the table with the
+handler in 121 `LSEG` blocks. The file system and the test files are not in
+this repository.
+
+| Step | Result |
+| --- | --- |
+| AROS (its own ROMs, the boot floppy, 8 MiB fast RAM), disk with an FFS partition and an empty partition `DH1` of type `PFS\3` | the handler from the table was running for `DH1`. AROS's `Format DRIVE DH1: NAME PTest QUICK` put up PFS3's own notice (it names "Professional File System 3 19.2" and the "All-In-One version") and finished; `Copy` and `Makedir` wrote files, `Dir` listed them, and `Info` showed `DH1: 3.6M … read/write PFS3 PTest`. 82 blocks written |
+| Kickstart 3.1, a 5 MB disk with that PFS3 partition at boot priority 5 and an FFS partition at 0 | booted from the PFS3 partition: its `S/Startup-Sequence` printed its line, wrote a file with `Echo >SYS:written`, and `If EXISTS` found that file and one written under AROS. `FileSystem.resource` had `PFS\3` 19.2 ahead of Kickstart's own entries. The saved image differs from the original only in 10 blocks, all of the PFS3 partition, one of them a new block with the written text |
+| Kickstart 1.3, the same disk | the boot ROM made `FileSystem.resource` (Kickstart 1.3 has none; its only entry was `PFS\3`); the handler was running, the volume `PTest` was mounted, and the CLI read the PFS3 partition's `S/Startup-Sequence`: it showed `Unknown command Echo`, 1.3 having no built-in commands. The FFS partition was not mounted as a volume, 1.3 having no Fast File System |
+| The app with Kickstart 3.1 and the same disk, after 25 seconds at warp speed | the window showed the three lines of the PFS3 partition's script |
+
+The screen texts were read from saved frames by OCR. Not tried: a table with
+several file systems on a real Kickstart (the unit tests cover it), SFS, the
+Fast File System from a Workbench disk under Kickstart 1.3, and Workbench
+itself on such a disk.
+
+The probe now prints the file systems of the table, the entries of
+`FileSystem.resource`, and DOS's devices (with the segment list and whether
+the handler is running) and volumes.
 
 ## Chip RAM and the ECS Agnus
 
@@ -886,7 +938,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-The tests are in two places. `swift test` runs the 96 tests of the Amiga
+The tests are in two places. `swift test` runs the 101 tests of the Amiga
 machine in `Tests/MacMigaCoreTests`. `swift test --package-path Packages/M68K`
 runs the 87 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
 branch, logic/shift, decimal/MOVEP/CHK and timing tests described below). Coverage includes
@@ -936,7 +988,14 @@ flags, priorities, long and short environment tables), every rejected case,
 the boot ROM's packet and table entry for each partition, requests anywhere on
 a partitioned disk with its geometry, and the boot ROM's initialisation run by
 the CPU against stand-in exec and expansion libraries that log their calls,
-for Kickstart 2.0+ and for 1.3.
+for Kickstart 2.0+ and for 1.3. For file systems in a partition table they
+cover the load-file reader (three hunks with long and short relocations, BSS
+and a chip-memory request, laid out as a segment list; six kinds of bad file),
+reading the headers and their `LSEG` chains including damaged ones, and the
+boot ROM's installation run by the CPU: a file system newer than the
+resource's is loaded and entered and its partition's device node patched by
+the patch flags, one that is not newer is skipped and the resource's entry
+used, and a missing resource is made.
 Volume tests cover LHA unpacking (the CRC-16 check value, an `-lh5-` stream
 with literals, overlapping and long matches and two blocks, made by a small
 encoder in the test, header levels 0–2, directory and file-name headers, Amiga
@@ -1033,9 +1092,10 @@ compatibility.
    without the floppy (see "AROS without a Kickstart ROM"); use the AROS
    desktop by hand in the app and fix what breaks; fast RAM sizes other than
    8 MB in the app.
-2. WHDLoad: try more installs and fix what breaks. Hard disk: load file
-   systems stored in a partition table; try an image partitioned on an Amiga.
-3. CPU package: instruction timing; later a 68030/68040 with MMU and FPU for
+2. WHDLoad: try more installs and fix what breaks. Hard disk: try an image
+   partitioned on an Amiga, and SFS and the 1.3 Fast File System from a
+   partition table.
+3. CPU package: address-error details and trace mode; later a 68030/68040 with MMU and FPU for
    NeXT.
 4. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix
    what breaks.
