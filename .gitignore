@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+.DS_Store
+.agent/
+*.rom
+*.adf
+*.adz
+*.hdf
