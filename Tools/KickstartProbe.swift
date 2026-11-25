@@ -14,6 +14,7 @@ struct KickstartProbe {
         var hardDiskPath: String?
         var hardDiskOutput: String?
         var fastRAM = 0
+        var chipRAM = 512 * 1024
         var presses: [(frame: Int, key: UInt8)] = []
         var fires: [Int] = []
         while paths.count >= 2, paths[0].hasPrefix("--") {
@@ -23,19 +24,20 @@ struct KickstartProbe {
             else if paths[0] == "--hdf" { hardDiskPath = paths[1] }
             else if paths[0] == "--hdf-out" { hardDiskOutput = paths[1] }
             else if paths[0] == "--fast", let value = Int(paths[1]), value >= 0 { fastRAM = value << 20 }
+            else if paths[0] == "--chip", let value = Int(paths[1]), [512, 1024, 2048].contains(value) { chipRAM = value << 10 }
             else if paths[0] == "--key", let (frame, key) = Self.keyPress(paths[1]) { presses.append((frame, key)) }
             else if paths[0] == "--fire", let frame = Int(paths[1]) { fires.append(frame) }
             else { break }
             paths.removeFirst(2)
         }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--key FRAME:HEXCODE]... [--fire FRAME]... <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--key FRAME:HEXCODE]... [--fire FRAME]... <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
             let bytes = try Data(contentsOf: URL(fileURLWithPath: path))
             let hardDisk = try hardDiskPath.map { try HardDisk(image: Array(try Data(contentsOf: URL(fileURLWithPath: $0)))) }
-            var machine = try AmigaMachine(kickstart: Array(bytes), fastRAMSize: fastRAM, hardDisk: hardDisk)
+            var machine = try AmigaMachine(kickstart: Array(bytes), chipRAMSize: chipRAM, fastRAMSize: fastRAM, hardDisk: hardDisk)
             if let adfPath {
                 try machine.memory.insertDisk(adf: Array(try Data(contentsOf: URL(fileURLWithPath: adfPath))))
                 print("DF0: \(URL(fileURLWithPath: adfPath).lastPathComponent)")

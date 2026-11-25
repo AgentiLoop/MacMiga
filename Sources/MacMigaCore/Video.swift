@@ -62,9 +62,9 @@ public struct Video: Equatable, Sendable {
 }
 
 extension AmigaMemory {
-    /// Chip RAM word as seen by DMA (512 KiB, address wraps).
+    /// Chip RAM word as seen by DMA (the address wraps at the size of chip RAM).
     func chipWord(at address: UInt32) -> UInt16 {
-        let index = Int(address & 0x7_FFFE)
+        let index = Int(address) & (chipRAM.count - 2)
         return UInt16(chipRAM[index]) << 8 | UInt16(chipRAM[index + 1])
     }
 

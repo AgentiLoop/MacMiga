@@ -14,12 +14,15 @@ public struct ResetVectors: Equatable, Sendable {
 /// CPU-side memory map subset with both CIAs. Custom chips and bus timing are not implemented.
 /// This is the bus the 68000 core (`M68K` package) runs on.
 public struct AmigaMemory: M68KBus {
-    public static let chipRAMSize = 512 * 1024
     private static let addressMask: UInt32 = 0x00FF_FFFF
-    /// Gary routes `$000000`–`$1FFFFF` to Agnus; 512 KiB of chip RAM repeats through it.
+    /// Gary routes `$000000`–`$1FFFFF` to Agnus; chip RAM repeats through it.
     private static let chipRAMSpace: UInt32 = 0x20_0000
+    /// The ROM overlay hides the first 512 KiB, whatever the size of chip RAM.
+    private static let overlaySize: UInt32 = 0x8_0000
     private let kickstart: [UInt8]
-    var chipRAM = [UInt8](repeating: 0, count: chipRAMSize)
+    var chipRAM: [UInt8]
+    /// 512 KiB with the OCS Agnus, 1 or 2 MiB with the ECS Agnus.
+    public var chipRAMSize: Int { chipRAM.count }
     /// A501-style "slow" (ranger) RAM at `$C00000`; empty when the machine has none.
     private var slowRAM: [UInt8]
     /// CIA-A (odd bytes, selected by A12 low): OVL/LED/disk/fire inputs, keyboard.
@@ -27,7 +30,7 @@ public struct AmigaMemory: M68KBus {
     /// CIA-B (even bytes, selected by A13 low): serial/parallel control, disk drive outputs.
     public var ciaB = CIA8520()
     /// OCS custom chip registers, decoded at `$DFF000`–`$DFFFFF` (mirrored every `$200`).
-    public var custom = CustomChips()
+    public var custom: CustomChips
     /// Copper and display output (Agnus DMA, Denise), driven by `advanceChipset`.
     public var copper = Copper()
     public var video = Video()
@@ -55,15 +58,20 @@ public struct AmigaMemory: M68KBus {
 
     /// Accepts a raw, unencrypted 256 KiB or 512 KiB ROM supplied by the caller.
     /// Size validation does not establish that the image is a valid Kickstart ROM.
+    /// `chipRAMSize` is 512 KiB (the stock A500 with its OCS Agnus), or 1 MiB or 2 MiB,
+    /// which fits the ECS Agnus (`CustomChips.Agnus.ecs`) that can address them.
     /// `slowRAMSize` is 0 (stock A500) or up to 1.5 MiB in 256 KiB steps; the default
     /// 512 KiB models the common A500 + A501 trapdoor expansion. `fastRAMSize` is 0 or a
     /// power of two from 64 KiB to 8 MiB on a Zorro II board; `hardDisk` fits the
     /// hard-disk controller board. Kickstart configures both boards during startup.
-    public init(kickstart: [UInt8], slowRAMSize: Int = 512 * 1024, fastRAMSize: Int = 0,
-                hardDisk: HardDisk? = nil) throws {
+    public init(kickstart: [UInt8], chipRAMSize: Int = 512 * 1024, slowRAMSize: Int = 512 * 1024,
+                fastRAMSize: Int = 0, hardDisk: HardDisk? = nil) throws {
         guard kickstart.count == 256 * 1024 || kickstart.count == 512 * 1024 else {
             throw MemoryBusError.invalidROMSize(kickstart.count)
         }
+        precondition([0x8_0000, 0x10_0000, 0x20_0000].contains(chipRAMSize))
+        self.chipRAM = [UInt8](repeating: 0, count: chipRAMSize)
+        self.custom = CustomChips(agnus: chipRAMSize > 0x8_0000 ? .ecs : .ocs)
         precondition(slowRAMSize >= 0 && slowRAMSize <= 0x18_0000 && slowRAMSize % 0x4_0000 == 0)
         precondition(fastRAMSize == 0 || (fastRAMSize >= 0x1_0000 && fastRAMSize <= 0x80_0000
                                           && fastRAMSize & (fastRAMSize - 1) == 0))
@@ -98,7 +106,7 @@ public struct AmigaMemory: M68KBus {
     public mutating func reset() throws -> ResetVectors {
         ciaA = CIA8520()
         ciaB = CIA8520()
-        custom = CustomChips()
+        custom = CustomChips(agnus: custom.agnus)
         copper = Copper()
         drive = FloppyDrive(disk: drive.disk) // a reset does not eject the disk
         updateDrive()
@@ -174,10 +182,10 @@ public struct AmigaMemory: M68KBus {
             return kickstart[Int(physical - 0xF8_0000) % kickstart.count]
         }
         if physical < Self.chipRAMSpace {
-            if overlayEnabled && physical < UInt32(Self.chipRAMSize) {
+            if overlayEnabled && physical < Self.overlaySize {
                 return kickstart[Int(physical) % kickstart.count]
             }
-            return chipRAM[Int(physical) % Self.chipRAMSize]
+            return chipRAM[Int(physical) & (chipRAM.count - 1)]
         }
         if physical >= fastRAMBase && physical - fastRAMBase < UInt32(fastRAM.count) {
             return fastRAM[Int(physical - fastRAMBase)]
@@ -205,8 +213,8 @@ public struct AmigaMemory: M68KBus {
         let physical = address & Self.addressMask
         if physical >= 0xF8_0000 || Self.isEmptyDiagnosticSlot(physical) { return }
         if physical < Self.chipRAMSpace {
-            if !(overlayEnabled && physical < UInt32(Self.chipRAMSize)) {
-                chipRAM[Int(physical) % Self.chipRAMSize] = value
+            if !(overlayEnabled && physical < Self.overlaySize) {
+                chipRAM[Int(physical) & (chipRAM.count - 1)] = value
             }
             return
         }

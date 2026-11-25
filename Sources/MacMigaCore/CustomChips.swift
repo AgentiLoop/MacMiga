@@ -1,10 +1,19 @@
-/// Register file of the OCS custom chips (Agnus, Denise, Paula) at `$DFF000`–`$DFF1FE`.
+/// Register file of the custom chips (Agnus, Denise, Paula) at `$DFF000`–`$DFF1FE`. Denise
+/// and Paula are the OCS chips; Agnus is the OCS 8371 or, for more than 512 KiB of chip
+/// RAM, the ECS 8372A (see `Agnus`).
 ///
 /// Implements the set/clear control registers (DMACON, INTENA, INTREQ, ADKCON) and
 /// their read-back registers, a PAL beam counter for VPOSR/VHPOSR, and storage of every
 /// other write-only register so later subsystems (Copper, bitplanes, Blitter, audio,
 /// disk) can consume them. No DMA, video, audio or Blitter behaviour happens here yet.
 public struct CustomChips: Equatable, Sendable {
+    /// Which Agnus is fitted. The ECS Agnus identifies itself in VPOSR (`$20`, PAL) and adds
+    /// three Blitter registers: BLTCON0L (the minterm byte of BLTCON0 on its own) and the
+    /// big-blit pair BLTSIZV/BLTSIZH. Its wider DMA pointers reach all of chip RAM.
+    /// Its other additions are not modelled: BEAMCON0 and the programmable beam registers
+    /// are stored without effect (the beam is always PAL), as is DIWHIGH.
+    public enum Agnus: Equatable, Sendable { case ocs, ecs }
+
     public enum Register {
         public static let dmaconr = 0x002, vposr = 0x004, vhposr = 0x006
         public static let joy0dat = 0x00A, joy1dat = 0x00C, adkconr = 0x010
@@ -19,7 +28,7 @@ public struct CustomChips: Equatable, Sendable {
         public static let bpl1pth = 0x0E0, bplcon0 = 0x100, bplcon1 = 0x102, bplcon2 = 0x104
         public static let bpl1mod = 0x108, bpl2mod = 0x10A, color00 = 0x180
         public static let bltcon0 = 0x040, bltcon1 = 0x042, bltafwm = 0x044, bltalwm = 0x046
-        public static let bltcpth = 0x048, bltsize = 0x058
+        public static let bltcpth = 0x048, bltsize = 0x058, bltcon0l = 0x05A, bltsizv = 0x05C, bltsizh = 0x05E
         public static let bltcmod = 0x060, bltbmod = 0x062, bltamod = 0x064, bltdmod = 0x066
         public static let bltcdat = 0x070, bltbdat = 0x072, bltadat = 0x074
     }
@@ -42,8 +51,10 @@ public struct CustomChips: Equatable, Sendable {
     var copperJump = 0
     /// Live Blitter pointers in register order: C, B, A, D.
     public internal(set) var blitterPointers = [UInt32](repeating: 0, count: 4)
-    /// Set by a BLTSIZE write until the Blitter has run the operation.
+    /// Set by a BLTSIZE (or ECS BLTSIZH) write until the Blitter has run the operation.
     public internal(set) var blitPending = false
+    /// Size of the pending blit in words and lines.
+    var blitWidth = 0, blitHeight = 0
     /// DMACONR BZERO: the last blit produced only zero D data.
     var blitterZero = false
     /// Sprite DMA pointers SPR0PT–SPR7PT and per-sprite Denise state.
@@ -75,7 +86,9 @@ public struct CustomChips: Equatable, Sendable {
         let previous: UInt16
     }
 
-    public init() {}
+    public let agnus: Agnus
+
+    public init(agnus: Agnus = .ocs) { self.agnus = agnus }
 
     /// 68000 interrupt level Paula asserts (0 = none); requires the INTEN master bit.
     public var interruptLevel: Int {
@@ -91,7 +104,8 @@ public struct CustomChips: Equatable, Sendable {
     public mutating func readWord(offset: Int) -> UInt16 {
         switch offset & 0x1FE {
         case Register.dmaconr: return dmacon | (blitterZero ? 0x2000 : 0) // BBUSY: blits finish at once
-        case Register.vposr: return UInt16(verticalPosition >> 8) & 0x0001 // PAL OCS Agnus ID 0, LOF 0
+        // Bits 14–8: Agnus ID, PAL 8371 = $00, PAL 8372A = $20. LOF 0.
+        case Register.vposr: return (agnus == .ecs ? 0x2000 : 0) | UInt16(verticalPosition >> 8) & 0x0001
         case Register.vhposr: return UInt16(verticalPosition & 0xFF) << 8 | UInt16(horizontalPosition & 0xFF)
         case Register.adkconr: return adkcon
         case Register.potgor: return 0xFF00 & ~(rightMouseButton ? 0x0400 : 0) // pull-ups when released
@@ -122,7 +136,18 @@ public struct CustomChips: Equatable, Sendable {
         case Register.adkcon: Self.setClear(&adkcon, value, mask: 0x7FFF)
         case Register.copjmp1: copperJump = 1
         case Register.copjmp2: copperJump = 2
-        case Register.bltsize: blitPending = true
+        case Register.bltsize: // height in bits 15–6, width in bits 5–0; 0 means 1024 and 64
+            blitHeight = value >> 6 == 0 ? 1024 : Int(value >> 6)
+            blitWidth = value & 0x3F == 0 ? 64 : Int(value & 0x3F)
+            blitPending = true
+        case Register.bltcon0l where agnus == .ecs: // replaces the low byte of BLTCON0
+            let high = written[Register.bltcon0 >> 1] & 0xFF00
+            written[Register.bltcon0 >> 1] = high | value & 0x00FF
+        case Register.bltsizh where agnus == .ecs: // width 11 bits, height from BLTSIZV (15 bits)
+            let height = Int(written[Register.bltsizv >> 1] & 0x7FFF)
+            blitHeight = height == 0 ? 0x8000 : height
+            blitWidth = value & 0x07FF == 0 ? 0x0800 : Int(value & 0x07FF)
+            blitPending = true
         case 0x0AA, 0x0BA, 0x0CA, 0x0DA: audioDataWritten |= 1 << ((register - 0x0AA) >> 4)
         case Register.joytest:
             mouseY = (mouseY & 3) | UInt8(value >> 8) & 0xFC

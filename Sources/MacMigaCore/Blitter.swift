@@ -1,12 +1,12 @@
-/// OCS Blitter. A blit runs to completion as soon as it is started (BLTSIZE written with
-/// DMAEN and BLTEN set), so BBUSY never reads 1 and blit timing/bus contention is not
+/// Blitter. A blit runs to completion as soon as it is started (BLTSIZE, or BLTSIZH on an
+/// ECS Agnus, written with DMAEN and BLTEN set), so BBUSY never reads 1 and blit timing/bus contention is not
 /// modelled. Supports area mode (A/B/C/D channels, shifts, first/last-word masks,
 /// minterms, ascending and descending order, modulos, inclusive/exclusive fill with FCI)
 /// and line mode (octants, SING; texture bit order is unverified). On completion BZERO is updated, the pointers
 /// hold their final values and INTREQ BLIT (bit 6) is raised. Pipeline quirks are ignored.
 extension AmigaMemory {
     mutating func writeChipWord(_ value: UInt16, at address: UInt32) {
-        let index = Int(address & 0x7_FFFE)
+        let index = Int(address) & (chipRAM.count - 2)
         chipRAM[index] = UInt8(value >> 8)
         chipRAM[index + 1] = UInt8(truncatingIfNeeded: value)
     }
@@ -28,11 +28,8 @@ extension AmigaMemory {
     mutating func runPendingBlit() {
         guard custom.blitPending, custom.dmacon & 0x0240 == 0x0240 else { return }
         custom.blitPending = false
-        let size = custom.register(CustomChips.Register.bltsize)
-        let height = Int(size >> 6) == 0 ? 1024 : Int(size >> 6)
-        let width = Int(size & 0x3F) == 0 ? 64 : Int(size & 0x3F)
         let zero = custom.register(CustomChips.Register.bltcon1) & 1 != 0
-            ? lineBlit(steps: height) : areaBlit(width: width, height: height)
+            ? lineBlit(steps: custom.blitHeight) : areaBlit(width: custom.blitWidth, height: custom.blitHeight)
         custom.blitterZero = zero
         custom.requestInterrupt(bits: 0x0040)
     }
