@@ -113,6 +113,8 @@ private func call(_ machine: inout AmigaMachine, _ address: UInt32) throws {
 @Test func hardDiskImageValidationAndGeometry() throws {
     #expect(throws: HardDiskError.invalidImageSize(1000)) { try HardDisk(image: [UInt8](repeating: 0, count: 1000)) }
     #expect(throws: HardDiskError.invalidImageSize(8192)) { try HardDisk(image: [UInt8](repeating: 0, count: 8192)) }
+    // A part block at the end is left out.
+    #expect(try HardDisk(image: [UInt8](repeating: 0, count: 2 * HardDisk.cylinderSize + 100)).bytes.count == 2 * HardDisk.cylinderSize)
     var image = [UInt8](repeating: 0, count: 3 * HardDisk.cylinderSize + 512)
     image.replaceSubrange(0..<4, with: Array("RDSK".utf8))
     #expect(throws: HardDiskError.invalidPartitionTable(block: 0)) { try HardDisk(image: image) } // no checksum

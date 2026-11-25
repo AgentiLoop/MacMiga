@@ -551,8 +551,7 @@ mount. Bad-block lists and drive-init code are ignored.
 
 Checked on November 25, 2026 with the probe. The images were made by a script
 (not committed) that puts volumes from `MakeHardfile` behind a Rigid Disk Block
-it writes itself; no image made by HDToolBox or another Amiga partitioning
-program was at hand.
+it writes itself. Images partitioned on an Amiga were tried afterwards (below).
 
 | ROM | Image | Result |
 | --- | --- | --- |
@@ -561,6 +560,14 @@ program was at hand.
 | Kickstart 3.1 | 16 heads × 63 sectors, two partitions | booted from `DH0`, wrote and found a file on it, and found a file on `DH1:` |
 | Kickstart 1.3 | 2 heads × 16 sectors, two OFS partitions, `DH1` not bootable | booted from `DH0` (the CLI named the command from `DH0`'s script as unknown, 1.3 having no built-in commands) |
 | Kickstart 1.3 | the same, `DH1` at priority 3 | booted from `DH1` |
+| Kickstart 3.1, 8 MiB fast RAM | HstWB Installer's image template `2gb_hdf_rdb_dh0-100mb-dos7_dh1-1.7gb-dos7` (partitioned with HDToolBox, 16 heads × 63 sectors, 1,900,000,000 bytes) | the table's FastFileSystem 45.16 was loaded for the two `DOS\7` partitions, which Kickstart's own FFS cannot read; both volumes, "Workbench" and "Work", were mounted and Kickstart booted from `DH0` to the shell prompt (the volumes are empty) |
+| Kickstart 3.1, 8 MiB fast RAM | the template `4gb_hdf_rdb_dh0-100mb-pds3_dh1-3.4gb-pds3` (3,800,000,000 bytes) | pfs3aio 19.2 from the table handled both `PDS\3` partitions; both volumes mounted, the second ending 3.8 GB into the image |
+
+These images are not a whole number of blocks long (1,900,000,000 bytes is
+3,710,937½ blocks), which `HardDisk` used to reject; the part block at the end
+is now left out. The templates are at
+`github.com/henrikstengaard/hstwb-installer/tree/master/images`; they are not
+in this repository (their partition tables carry the file system programs).
 
 The frames from hardfiles (a Kickstart 3.1 shell boot, WHDLoad with Pac-Man,
 and the Kickstart 1.3 boot) are identical to those before this change. Whether

@@ -1,5 +1,5 @@
 public enum HardDiskError: Error, Equatable {
-    /// The image is not a whole number of 512-byte blocks or is smaller than 32 blocks.
+    /// The image is smaller than 32 blocks.
     case invalidImageSize(Int)
     /// A Rigid Disk Block or partition block has the wrong ID, a bad checksum, an unusable
     /// environment table, or is reached twice. `block` is its block number.
@@ -89,10 +89,11 @@ public final class HardDisk {
     public private(set) var blocksRead = 0
     public private(set) var blocksWritten = 0
 
+    /// Bytes after the last whole block, which some tools leave (an image of 1,900,000,000
+    /// bytes, for example), are not used.
     public init(image: [UInt8], writeProtected: Bool = false) throws {
-        guard image.count >= Self.cylinderSize, image.count % Self.blockSize == 0 else {
-            throw HardDiskError.invalidImageSize(image.count)
-        }
+        guard image.count >= Self.cylinderSize else { throw HardDiskError.invalidImageSize(image.count) }
+        let image = image.count % Self.blockSize == 0 ? image : Array(image.prefix(image.count / Self.blockSize * Self.blockSize))
         bytes = image
         isWriteProtected = writeProtected
         func long(_ block: Int, _ offset: Int) -> UInt32 {
