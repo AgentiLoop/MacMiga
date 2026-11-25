@@ -169,3 +169,14 @@ private func syntheticROM(size: Int = 256 * 1024) -> [UInt8] {
     #expect(try memory.readLong(at: 0xE8_0000) == 0)
     #expect(try memory.readWord(at: 0xEF_FFFE) == 0)
 }
+
+@Test func machineTreatsUnmappedAddressesAsOpenBus() throws {
+    var machine = try AmigaMachine(kickstart: syntheticROM())
+    machine.memory.setOverlay(enabled: false)
+    try machine.memory.writeLong(0x1234_5678, at: 0x20_0000) // nothing there: ignored
+    #expect(try machine.memory.readLong(at: 0x20_0000) == 0)
+    #expect(try machine.memory.readByte(at: 0xE0_0001) == 0)
+    // A plain AmigaMemory still reports the access for diagnostics.
+    var memory = try AmigaMemory(kickstart: syntheticROM())
+    #expect(throws: MemoryBusError.unmappedAddress(0x20_0000)) { try memory.readByte(at: 0x20_0000) }
+}

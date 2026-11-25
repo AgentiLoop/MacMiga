@@ -25,6 +25,7 @@ public struct AmigaMachine {
 
     public init(kickstart: [UInt8], slowRAMSize: Int = 512 * 1024) throws {
         memory = try AmigaMemory(kickstart: kickstart, slowRAMSize: slowRAMSize)
+        memory.stopsOnUnmappedAccess = false
         try cpu.reset(memory: &memory)
     }
 

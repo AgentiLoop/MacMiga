@@ -35,6 +35,11 @@ public struct AmigaMemory {
     /// Whether the most recent `unalignedAddress` error came from a write (for the
     /// 68000 address-error frame's R/W bit).
     public internal(set) var unalignedAccessWasWrite = false
+    /// When true (the default, for bus diagnostics), byte accesses to addresses with nothing
+    /// behind them throw `MemoryBusError.unmappedAddress`. When false (hardware behaviour,
+    /// set by `AmigaMachine`), such reads return 0 and writes are ignored; the A500 has no
+    /// bus-error source, and real reads there return whatever was last on the data bus.
+    public var stopsOnUnmappedAccess = true
 
     /// ROM overlay follows CIA-A PA0 (OVL). The line is pulled up, so it is active
     /// while PA0 is still an input after reset.
@@ -149,7 +154,7 @@ public struct AmigaMemory {
             let word = custom.readWord(offset: Int(physical & 0x1FE))
             return physical & 1 == 0 ? UInt8(word >> 8) : UInt8(truncatingIfNeeded: word)
         }
-        if Self.isEmptyIORange(physical) || Self.isEmptyAutoconfig(physical) { return 0 }
+        if Self.isEmptyIORange(physical) || Self.isEmptyAutoconfig(physical) || !stopsOnUnmappedAccess { return 0 }
         throw MemoryBusError.unmappedAddress(physical)
     }
 
@@ -181,7 +186,7 @@ public struct AmigaMemory {
             custom.writeWord(offset: Int(physical & 0x1FE), value: UInt16(value) << 8 | UInt16(value))
             return
         }
-        if Self.isEmptyIORange(physical) || Self.isEmptyAutoconfig(physical) { return }
+        if Self.isEmptyIORange(physical) || Self.isEmptyAutoconfig(physical) || !stopsOnUnmappedAccess { return }
         throw MemoryBusError.unmappedAddress(physical)
     }
 
