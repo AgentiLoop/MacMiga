@@ -192,12 +192,12 @@ private func referenceFlags(_ destination: UInt32, _ source: UInt32, size: Int, 
         0x537C  // SUBQ.W #1,#imm
     ]
     for opcode in invalid {
-        var memory = try arithmeticMemory([opcode], at: 0x7FFFE)
+        var memory = try arithmeticMemory([opcode], at: 0x1FFFFE)
         var cpu = MC68000()
-        cpu.programCounter = 0x7FFFE
+        cpu.programCounter = 0x1FFFFE
         for index in 0..<8 { cpu[address: index] = 0x400; cpu[data: index] = 0x55 }
         let before = cpu
-        #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x7FFFE)) {
+        #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x1FFFFE)) {
             try cpu.step(memory: &memory)
         }
         #expect(cpu == before)
@@ -206,15 +206,15 @@ private func referenceFlags(_ destination: UInt32, _ source: UInt32, size: Int, 
 
 @Test func arithmeticFaultsPreserveCPU() throws {
     let cases: [(UInt16, MemoryBusError)] = [
-        (0xD190, .unmappedAddress(0x80000)), // ADD.L D0,(A0)
-        (0x9098, .unmappedAddress(0x80000)), // SUB.L (A0)+,D0: A0 not incremented on fault
-        (0x5290, .unmappedAddress(0x80000))  // ADDQ.L #1,(A0)
+        (0xD190, .unmappedAddress(0x200000)), // ADD.L D0,(A0)
+        (0x9098, .unmappedAddress(0x200000)), // SUB.L (A0)+,D0: A0 not incremented on fault
+        (0x5290, .unmappedAddress(0x200000))  // ADDQ.L #1,(A0)
     ]
     for (opcode, error) in cases {
         var memory = try arithmeticMemory([opcode])
         var cpu = MC68000()
         cpu.programCounter = 0x100
-        cpu[address: 0] = 0x80000
+        cpu[address: 0] = 0x200000
         let before = cpu
         #expect(throws: error) { try cpu.step(memory: &memory) }
         #expect(cpu == before)

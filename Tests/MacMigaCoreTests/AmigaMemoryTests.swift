@@ -110,13 +110,46 @@ private func syntheticROM(size: Int = 256 * 1024) -> [UInt8] {
 @Test func reportsUnimplementedRegionsRatherThanInventingDeviceData() throws {
     var memory = try AmigaMemory(kickstart: syntheticROM())
     memory.setOverlay(enabled: false)
-    for address: UInt32 in [0x08_0000, 0x9F_FFFF, 0xC0_0000, 0xD7_FFFF, 0xEF_FFFF] {
+    for address: UInt32 in [0x20_0000, 0x9F_FFFF, 0xE0_0000, 0xEF_FFFF] {
         #expect(throws: MemoryBusError.unmappedAddress(address)) { try memory.readByte(at: address) }
         #expect(throws: MemoryBusError.unmappedAddress(address)) { try memory.writeByte(0xFF, at: address) }
     }
-    #expect(throws: MemoryBusError.unmappedAddress(0x08_0000)) {
-        try memory.readLong(at: 0x07_FFFE)
+    #expect(throws: MemoryBusError.unmappedAddress(0x20_0000)) {
+        try memory.readLong(at: 0x1F_FFFE)
     }
+}
+
+@Test func chipRAMMirrorsThroughTwoMegabyteChipSpace() throws {
+    var memory = try AmigaMemory(kickstart: syntheticROM())
+    memory.setOverlay(enabled: false)
+    try memory.writeLong(0x1234_5678, at: 0x100)
+    for mirror: UInt32 in [0x08_0100, 0x10_0100, 0x18_0100] {
+        #expect(try memory.readLong(at: mirror) == 0x1234_5678)
+    }
+    try memory.writeWord(0xBEEF, at: 0x1F_FFFE)
+    #expect(try memory.readWord(at: 0x07_FFFE) == 0xBEEF)
+    // The overlay covers only the first 512 KiB; mirrors above still reach chip RAM.
+    memory.setOverlay(enabled: true)
+    #expect(try memory.readWord(at: 0x08_0100) == 0x1234)
+}
+
+@Test func slowRAMAndCustomChipMirrorAtC00000() throws {
+    var memory = try AmigaMemory(kickstart: syntheticROM())
+    memory.setOverlay(enabled: false)
+    try memory.writeLong(0xCAFE_F00D, at: 0xC7_FFFC)
+    #expect(try memory.readLong(at: 0xC7_FFFC) == 0xCAFE_F00D)
+    #expect(try memory.readWord(at: 0x00_FFFC) == 0) // independent of chip RAM
+    // Kickstart's probe: INTENA written through $C3F09A lands in RAM, not the chips...
+    try memory.writeWord(0xC000, at: 0xC3_F09A)
+    #expect(memory.custom.intena == 0)
+    // ...but above the fitted RAM the custom chips answer.
+    try memory.writeWord(0xC000, at: 0xCB_F09A)
+    #expect(memory.custom.intena == 0x4000)
+    #expect(try memory.readWord(at: 0xD7_F01C) == 0x4000)
+
+    var stock = try AmigaMemory(kickstart: syntheticROM(), slowRAMSize: 0)
+    try stock.writeWord(0xC000, at: 0xC3_F09A)
+    #expect(try stock.readWord(at: 0xDF_F01C) == 0x4000)
 }
 
 @Test func emptyDiagnosticSlotReadsZeroAndIgnoresWrites() throws {

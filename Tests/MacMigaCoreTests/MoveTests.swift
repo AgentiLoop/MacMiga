@@ -235,7 +235,7 @@ private func moveMemory(_ words: [UInt16]) throws -> AmigaMemory {
 @Test func moveFaultsPreserveCPUAndExposePartialBusWrites() throws {
     // Invalid source read, invalid destination write, and missing destination extension.
     for (opcode, source, destination): (UInt16, UInt32, UInt32) in [
-        (0x2218, 0x80000, 0), (0x2218, 0x301, 0), (0x2298, 0x300, 0x80000)
+        (0x2218, 0x200000, 0), (0x2218, 0x301, 0), (0x2298, 0x300, 0x200000)
     ] {
         var memory = try moveMemory([opcode])
         var cpu = MC68000()
@@ -247,21 +247,21 @@ private func moveMemory(_ words: [UInt16]) throws -> AmigaMemory {
         #expect(cpu == before)
     }
     var memory = try moveMemory([])
-    try memory.writeWord(0x23D8, at: 0x7FFFE) // MOVE.L (A0)+,absolute.L (extension unavailable)
+    try memory.writeWord(0x23D8, at: 0x1FFFFE) // MOVE.L (A0)+,absolute.L (extension unavailable)
     var cpu = MC68000()
-    cpu.programCounter = 0x7FFFE
+    cpu.programCounter = 0x1FFFFE
     cpu[address: 0] = 0x300
     var before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x80000)) { try cpu.step(memory: &memory) }
+    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
     try memory.writeWord(0x20C0, at: 0x100) // MOVE.L D0,(A0)+ crosses RAM boundary.
     cpu.programCounter = 0x100
-    cpu[address: 0] = 0x7FFFE
+    cpu[address: 0] = 0x1FFFFE
     cpu[data: 0] = 0x1234_5678
     before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x80000)) { try cpu.step(memory: &memory) }
+    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
-    #expect(try memory.readWord(at: 0x7FFFE) == 0x1234)
+    #expect(try memory.readWord(at: 0x1FFFFE) == 0x1234)
 }
 
 @Test func moveSyntheticCopyProgram() throws {

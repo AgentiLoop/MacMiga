@@ -158,12 +158,12 @@ private func compareFlags(_ destination: UInt32, _ source: UInt32, bits: Int) ->
 }
 
 @Test func dbccDisplacementFetchFaultPreservesCPU() throws {
-    var memory = try compareMemory([0x51C8], at: 0x7FFFE)
+    var memory = try compareMemory([0x51C8], at: 0x1FFFFE)
     var cpu = MC68000()
-    cpu.programCounter = 0x7FFFE
+    cpu.programCounter = 0x1FFFFE
     cpu[data: 0] = 7
     let before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x80000)) { try cpu.step(memory: &memory) }
+    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
 }
 
@@ -177,11 +177,11 @@ private func compareFlags(_ destination: UInt32, _ source: UInt32, bits: Int) ->
         0xB148  // CMPM.W (A0)+,(A0)+ is not implemented yet
     ]
     for opcode in invalid {
-        var memory = try compareMemory([opcode], at: 0x7FFFE)
+        var memory = try compareMemory([opcode], at: 0x1FFFFE)
         var cpu = MC68000()
-        cpu.programCounter = 0x7FFFE
+        cpu.programCounter = 0x1FFFFE
         let before = cpu
-        #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x7FFFE)) {
+        #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x1FFFFE)) {
             try cpu.step(memory: &memory)
         }
         #expect(cpu == before)
@@ -190,9 +190,9 @@ private func compareFlags(_ destination: UInt32, _ source: UInt32, bits: Int) ->
     var memory = try compareMemory([0xB098])
     var cpu = MC68000()
     cpu.programCounter = 0x100
-    cpu[address: 0] = 0x80000
+    cpu[address: 0] = 0x200000
     let before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x80000)) { try cpu.step(memory: &memory) }
+    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
 }
 

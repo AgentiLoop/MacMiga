@@ -76,5 +76,5 @@ private func customMemory() throws -> AmigaMemory {
     #expect(try memory.readByte(at: 0xDA_8000) == 0)
     #expect(try memory.readWord(at: 0xDE_1000) == 0)
     #expect(try memory.readLong(at: 0xD8_0000) == 0)
-    #expect(throws: MemoryBusError.unmappedAddress(0xD7_FFFF)) { try memory.readByte(at: 0xD7_FFFF) }
+    #expect(throws: MemoryBusError.unmappedAddress(0xE0_0000)) { try memory.readByte(at: 0xE0_0000) }
 }

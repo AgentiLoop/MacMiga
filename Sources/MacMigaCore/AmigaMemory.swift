@@ -13,8 +13,12 @@ public struct ResetVectors: Equatable, Sendable {
 public struct AmigaMemory {
     public static let chipRAMSize = 512 * 1024
     private static let addressMask: UInt32 = 0x00FF_FFFF
+    /// Gary routes `$000000`–`$1FFFFF` to Agnus; 512 KiB of chip RAM repeats through it.
+    private static let chipRAMSpace: UInt32 = 0x20_0000
     private let kickstart: [UInt8]
     private var chipRAM = [UInt8](repeating: 0, count: chipRAMSize)
+    /// A501-style "slow" (ranger) RAM at `$C00000`; empty when the machine has none.
+    private var slowRAM: [UInt8]
     /// CIA-A (odd bytes, selected by A12 low): OVL/LED/disk/fire inputs, keyboard.
     public var ciaA = CIA8520()
     /// CIA-B (even bytes, selected by A13 low): serial/parallel control, disk drive outputs.
@@ -28,11 +32,15 @@ public struct AmigaMemory {
 
     /// Accepts a raw, unencrypted 256 KiB or 512 KiB ROM supplied by the caller.
     /// Size validation does not establish that the image is a valid Kickstart ROM.
-    public init(kickstart: [UInt8]) throws {
+    /// `slowRAMSize` is 0 (stock A500) or up to 1.5 MiB in 256 KiB steps; the default
+    /// 512 KiB models the common A500 + A501 trapdoor expansion.
+    public init(kickstart: [UInt8], slowRAMSize: Int = 512 * 1024) throws {
         guard kickstart.count == 256 * 1024 || kickstart.count == 512 * 1024 else {
             throw MemoryBusError.invalidROMSize(kickstart.count)
         }
+        precondition(slowRAMSize >= 0 && slowRAMSize <= 0x18_0000 && slowRAMSize % 0x4_0000 == 0)
         self.kickstart = kickstart
+        self.slowRAM = [UInt8](repeating: 0, count: slowRAMSize)
     }
 
     /// Host convenience: drives CIA-A PA0 as an output at the requested OVL level.
@@ -60,19 +68,27 @@ public struct AmigaMemory {
         physical >= 0xF0_0000 && physical < 0xF8_0000
     }
 
-    /// `$A00000`–`$BFFFFF` selects the CIAs: register = A8–A11; CIA-A answers odd bytes
-    /// when A12 is low, CIA-B even bytes when A13 is low. An unselected byte lane reads
-    /// as `$FF` here (real hardware: open bus).
     /// `$D80000`–`$DFEFFF` holds no device on a stock A500 (no RTC, no Gayle/IDE);
     /// reads return 0 and writes are ignored. Kickstart 3.1 probes the A600 Gayle here.
     private static func isEmptyIORange(_ physical: UInt32) -> Bool {
         physical >= 0xD8_0000 && physical < 0xDF_F000
     }
 
-    private static func isCustomRange(_ physical: UInt32) -> Bool {
-        physical >= 0xDF_F000 && physical < 0xE0_0000
+    /// Custom registers at `$DFF000`–`$DFFFFF`, plus the part of `$C00000`–`$D7FFFF` not
+    /// backed by slow RAM: without RAM there, the A500 decodes those addresses to the
+    /// custom chips, which Kickstart detects by writing INTENA through the mirror.
+    private func isCustomRange(_ physical: UInt32) -> Bool {
+        (physical >= 0xDF_F000 && physical < 0xE0_0000)
+            || (physical >= 0xC0_0000 + UInt32(slowRAM.count) && physical < 0xD8_0000)
     }
 
+    private func isSlowRAM(_ physical: UInt32) -> Bool {
+        physical >= 0xC0_0000 && physical < 0xC0_0000 + UInt32(slowRAM.count)
+    }
+
+    /// `$A00000`–`$BFFFFF` selects the CIAs: register = A8–A11; CIA-A answers odd bytes
+    /// when A12 is low, CIA-B even bytes when A13 is low. An unselected byte lane reads
+    /// as `$FF` here (real hardware: open bus).
     private static func isCIARange(_ physical: UInt32) -> Bool {
         physical >= 0xA0_0000 && physical < 0xC0_0000
     }
@@ -82,12 +98,13 @@ public struct AmigaMemory {
         if physical >= 0xF8_0000 {
             return kickstart[Int(physical - 0xF8_0000) % kickstart.count]
         }
-        if physical < UInt32(Self.chipRAMSize) {
-            if overlayEnabled {
+        if physical < Self.chipRAMSpace {
+            if overlayEnabled && physical < UInt32(Self.chipRAMSize) {
                 return kickstart[Int(physical) % kickstart.count]
             }
-            return chipRAM[Int(physical)]
+            return chipRAM[Int(physical) % Self.chipRAMSize]
         }
+        if isSlowRAM(physical) { return slowRAM[Int(physical - 0xC0_0000)] }
         if Self.isEmptyDiagnosticSlot(physical) { return 0 }
         if Self.isCIARange(physical) {
             let register = Int(physical >> 8) & 0xF
@@ -96,7 +113,7 @@ public struct AmigaMemory {
             }
             return physical & 0x2000 == 0 ? ciaB.read(register: register) : 0xFF
         }
-        if Self.isCustomRange(physical) {
+        if isCustomRange(physical) {
             let word = custom.readWord(offset: Int(physical & 0x1FE))
             return physical & 1 == 0 ? UInt8(word >> 8) : UInt8(truncatingIfNeeded: word)
         }
@@ -107,8 +124,14 @@ public struct AmigaMemory {
     public mutating func writeByte(_ value: UInt8, at address: UInt32) throws {
         let physical = address & Self.addressMask
         if physical >= 0xF8_0000 || Self.isEmptyDiagnosticSlot(physical) { return }
-        if physical < UInt32(Self.chipRAMSize) {
-            if !overlayEnabled { chipRAM[Int(physical)] = value }
+        if physical < Self.chipRAMSpace {
+            if !(overlayEnabled && physical < UInt32(Self.chipRAMSize)) {
+                chipRAM[Int(physical) % Self.chipRAMSize] = value
+            }
+            return
+        }
+        if isSlowRAM(physical) {
+            slowRAM[Int(physical - 0xC0_0000)] = value
             return
         }
         if Self.isCIARange(physical) {
@@ -120,7 +143,7 @@ public struct AmigaMemory {
             }
             return
         }
-        if Self.isCustomRange(physical) {
+        if isCustomRange(physical) {
             // A byte write drives the same byte onto both halves of the 16-bit bus.
             custom.writeWord(offset: Int(physical & 0x1FE), value: UInt16(value) << 8 | UInt16(value))
             return
@@ -132,7 +155,7 @@ public struct AmigaMemory {
     public mutating func readWord(at address: UInt32) throws -> UInt16 {
         try checkAlignment(address)
         let physical = address & Self.addressMask
-        if Self.isCustomRange(physical) { return custom.readWord(offset: Int(physical & 0x1FE)) }
+        if isCustomRange(physical) { return custom.readWord(offset: Int(physical & 0x1FE)) }
         let high = try readByte(at: address)
         let low = try readByte(at: address &+ 1)
         return UInt16(high) << 8 | UInt16(low)
@@ -147,7 +170,7 @@ public struct AmigaMemory {
     public mutating func writeWord(_ value: UInt16, at address: UInt32) throws {
         try checkAlignment(address)
         let physical = address & Self.addressMask
-        if Self.isCustomRange(physical) {
+        if isCustomRange(physical) {
             custom.writeWord(offset: Int(physical & 0x1FE), value: value)
             return
         }

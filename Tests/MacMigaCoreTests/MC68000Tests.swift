@@ -38,14 +38,14 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
 
 @Test func cpuStackBanksAndStatusMask() {
     var cpu = MC68000()
-    cpu[address: 7] = 0x80000
+    cpu[address: 7] = 0x200000
     cpu.statusRegister = 0
     cpu[address: 7] = 0x2000
     #expect(cpu.userStackPointer == 0x2000)
-    #expect(cpu.supervisorStackPointer == 0x80000)
+    #expect(cpu.supervisorStackPointer == 0x200000)
     cpu.statusRegister = 0xFFFF
     #expect(cpu.statusRegister == 0xA71F)
-    #expect(cpu[address: 7] == 0x80000)
+    #expect(cpu[address: 7] == 0x200000)
     for register in 0..<7 {
         cpu[address: register] = UInt32(register + 1)
         #expect(cpu[address: register] == UInt32(register + 1))
@@ -145,7 +145,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
             cpu.programCounter = 0x100
             cpu.statusRegister = supervisor ? 0x271F : 0x001F
             cpu.userStackPointer = 0x4000
-            cpu.supervisorStackPointer = 0x80000
+            cpu.supervisorStackPointer = 0x200000
             let initial = cpu
             let sp = cpu[address: 7]
             let returnAddress: UInt32 = wordForm ? 0x104 : 0x102
@@ -167,12 +167,12 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
     var memory = try cpuMemory([0x7000, 0x6608, 0x6102, 0x6004, 0x72FF, 0x4E75, 0x4E71])
     var cpu = MC68000()
     cpu.programCounter = 0x100
-    cpu[address: 7] = 0x80000
+    cpu[address: 7] = 0x200000
     for _ in 0..<7 { try cpu.step(memory: &memory) }
     #expect(cpu[data: 0] == 0)
     #expect(cpu[data: 1] == 0xFFFF_FFFF)
     #expect(cpu.programCounter == 0x10E)
-    #expect(cpu[address: 7] == 0x80000)
+    #expect(cpu[address: 7] == 0x200000)
 }
 
 @Test func unsupportedOpcodesDoNotSilentlyExecuteOrChangeCPU() throws {
@@ -192,20 +192,20 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
 @Test func fetchExtensionAndStackErrorsPreserveCPUState() throws {
     var memory = try cpuMemory([0x6102, 0x4E75])
     var cpu = MC68000()
-    for address: UInt32 in [0x101, 0x80000] {
+    for address: UInt32 in [0x101, 0x200000] {
         cpu.programCounter = address
         let before = cpu
         #expect(throws: MemoryBusError.self) { try cpu.step(memory: &memory) }
         #expect(cpu == before)
     }
     // Untaken BNE.W still needs its extension word.
-    try memory.writeWord(0x6600, at: 0x7FFFE)
-    cpu.programCounter = 0x7FFFE
+    try memory.writeWord(0x6600, at: 0x1FFFFE)
+    cpu.programCounter = 0x1FFFFE
     cpu.statusRegister = 0x2704
     var before = cpu
-    #expect(throws: MemoryBusError.unmappedAddress(0x80000)) { try cpu.step(memory: &memory) }
+    #expect(throws: MemoryBusError.unmappedAddress(0x200000)) { try cpu.step(memory: &memory) }
     #expect(cpu == before)
-    for (pc, sp): (UInt32, UInt32) in [(0x100, 0x1001), (0x100, 0x80004), (0x102, 0x1001), (0x102, 0x80000)] {
+    for (pc, sp): (UInt32, UInt32) in [(0x100, 0x1001), (0x100, 0x200004), (0x102, 0x1001), (0x102, 0x200000)] {
         cpu.programCounter = pc
         cpu[address: 7] = sp
         before = cpu

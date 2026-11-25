@@ -113,13 +113,13 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
     for base in bases {
         for ea in invalid {
             let opcode = base | UInt16(ea)
-            var memory = try controlMemory([opcode], at: 0x7FFFE)
+            var memory = try controlMemory([opcode], at: 0x1FFFFE)
             var cpu = MC68000()
-            cpu.programCounter = 0x7FFFE
+            cpu.programCounter = 0x1FFFFE
             for index in 0..<8 { cpu[address: index] = 0x400 }
             try memory.writeLong(0xDEADBEEF, at: 0x3FC)
             let before = cpu
-            #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x7FFFE)) {
+            #expect(throws: CPUError.unsupportedInstruction(opcode: opcode, address: 0x1FFFFE)) {
                 try cpu.step(memory: &memory)
             }
             #expect(cpu == before)
@@ -133,7 +133,7 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
         for ea: UInt16 in [0x28, 0x30, 0x38, 0x39, 0x3A, 0x3B] {
             for partialLong in [false, true] {
                 if partialLong && ea != 0x39 { continue }
-                let start: UInt32 = partialLong ? 0x7FFFC : 0x7FFFE
+                let start: UInt32 = partialLong ? 0x1FFFFC : 0x1FFFFE
                 let words: [UInt16] = partialLong ? [base | ea, 0x1234] : [base | ea]
                 var memory = try controlMemory(words, at: start)
                 var cpu = MC68000()
@@ -141,7 +141,7 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
                 cpu[address: 7] = 0x400
                 try memory.writeLong(0xDEADBEEF, at: 0x3FC)
                 let before = cpu
-                #expect(throws: MemoryBusError.unmappedAddress(0x80000)) {
+                #expect(throws: MemoryBusError.unmappedAddress(0x200000)) {
                     try cpu.step(memory: &memory)
                 }
                 #expect(cpu == before)
@@ -154,26 +154,26 @@ private func controlMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws
 @Test func jsrStackFaultsAndPartialWrites() throws {
     let cases: [(stack: UInt32, error: MemoryBusError)] = [
         (0x403, .unalignedAddress(0x3FF)),
-        (0x80004, .unmappedAddress(0x80000)),
-        (0x80002, .unmappedAddress(0x80000))
+        (0x200004, .unmappedAddress(0x200000)),
+        (0x200002, .unmappedAddress(0x200000))
     ]
     for item in cases {
         var memory = try controlMemory([0x4EB9, 0, 0x300])
-        try memory.writeWord(0xFFFF, at: 0x7FFFE)
+        try memory.writeWord(0xFFFF, at: 0x1FFFFE)
         var cpu = MC68000()
         cpu.programCounter = 0xAB000100
         cpu[address: 7] = item.stack
         let before = cpu
         #expect(throws: item.error) { try cpu.step(memory: &memory) }
         #expect(cpu == before)
-        #expect(try memory.readWord(at: 0x7FFFE) == (item.stack == 0x80002 ? 0xAB00 : 0xFFFF))
+        #expect(try memory.readWord(at: 0x1FFFFE) == (item.stack == 0x200002 ? 0xAB00 : 0xFFFF))
     }
 }
 
 @Test func jumpTargetFaultsOccurOnNextFetch() throws {
     for opcode: UInt16 in [0x4EF9, 0x4EB9] {
         for (target, error): (UInt32, MemoryBusError) in [
-            (0x301, .unalignedAddress(0x301)), (0x80000, .unmappedAddress(0x80000))
+            (0x301, .unalignedAddress(0x301)), (0x200000, .unmappedAddress(0x200000))
         ] {
             var memory = try controlMemory([opcode, UInt16(target >> 16), UInt16(truncatingIfNeeded: target)])
             var cpu = MC68000()
