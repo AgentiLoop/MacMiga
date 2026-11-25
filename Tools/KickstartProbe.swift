@@ -79,7 +79,12 @@ struct KickstartProbe {
             }
             if !boards.isEmpty { print("Expansion boards: " + boards.joined(separator: ", ")) }
             if let hardDisk {
-                print("DH0: \(hardDisk.cylinders) cylinders, \(hardDisk.blocksRead) blocks read, \(hardDisk.blocksWritten) written")
+                let partitions = hardDisk.partitions.map { partition in
+                    let type = String(format: "$%08X", partition.dosType)
+                    return "\(partition.name) (DosType \(type), blocks \(partition.firstBlock)-\(partition.firstBlock + partition.blockCount - 1), boot priority \(partition.bootPriority))"
+                }
+                print("Hard disk \(hardDisk.isPartitioned ? "with partition table" : "hardfile"): " + partitions.joined(separator: ", "))
+                print("Hard disk: \(hardDisk.blocksRead) blocks read, \(hardDisk.blocksWritten) written")
                 if let hardDiskOutput {
                     try Data(hardDisk.bytes).write(to: URL(fileURLWithPath: hardDiskOutput))
                     print("Hard disk image written to \(hardDiskOutput)")

@@ -115,13 +115,16 @@ private func call(_ machine: inout AmigaMachine, _ address: UInt32) throws {
     #expect(throws: HardDiskError.invalidImageSize(8192)) { try HardDisk(image: [UInt8](repeating: 0, count: 8192)) }
     var image = [UInt8](repeating: 0, count: 3 * HardDisk.cylinderSize + 512)
     image.replaceSubrange(0..<4, with: Array("RDSK".utf8))
-    #expect(throws: HardDiskError.rigidDiskBlockUnsupported) { try HardDisk(image: image) }
+    #expect(throws: HardDiskError.invalidPartitionTable(block: 0)) { try HardDisk(image: image) } // no checksum
     image.replaceSubrange(0..<4, with: [0x44, 0x4F, 0x53, 0x00])
     let ofs = try HardDisk(image: image)
     #expect(ofs.cylinders == 3)
     #expect(ofs.capacity == 3 * 16384)
-    #expect(ofs.dosType == 0x444F_5300)
-    #expect(try disk().dosType == 0x444F_5301) // no signature: mounted as FFS
+    #expect(!ofs.isPartitioned)
+    #expect(ofs.partitions.map(\.name) == ["DH0"])
+    #expect(ofs.partitions[0].dosType == 0x444F_5300)
+    #expect(ofs.partitions[0].firstBlock == 0 && ofs.partitions[0].blockCount == 96)
+    #expect(try disk().partitions[0].dosType == 0x444F_5301) // no signature: mounted as FFS
 }
 
 @Test func hardDiskRequestsReadWriteAndReportErrors() throws {
@@ -185,7 +188,7 @@ private func call(_ machine: inout AmigaMachine, _ address: UInt32) throws {
     var machine = try hardDiskMachine(disk)
     let controller = machine.memory.hardDiskController
     // MakeDosNode packet: DH0 on macmiga.device unit 0, then the environment.
-    let packet = try #require(controller.address(of: "parameters"))
+    let packet = try #require(controller.address(of: "parameters0"))
     func string(at address: UInt32) throws -> String {
         var bytes = [UInt8](), address = address
         while let byte = try? machine.memory.readByte(at: address), byte != 0 { bytes.append(byte); address += 1 }

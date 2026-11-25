@@ -322,7 +322,7 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
     let image = try FastFileSystem.hardfile(named: "TestVolume", entries: entries, freeBytes: 0, date: stamp)
     #expect(image.count % HardDisk.cylinderSize == 0)
     let disk = try HardDisk(image: image)
-    #expect(disk.dosType == 0x444F_5301)
+    #expect(disk.partitions[0].dosType == 0x444F_5301)
 
     var reader = VolumeReader(image: image)
     let root = reader.root
