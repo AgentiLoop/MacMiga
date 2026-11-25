@@ -13,9 +13,13 @@ struct KickstartProbe {
         var adfPath: String?
         var hardDiskPath: String?
         var hardDiskOutput: String?
+        var extendedROMPath: String?
         var fastRAM = 0
         var chipRAM = 512 * 1024
         var trace = 0
+        var history = 0
+        var exceptionsFrom: Int?
+        var watch: (address: UInt32, fromFrame: Int)?
         var presses: [(frame: Int, key: UInt8)] = []
         var fires: [Int] = []
         var moves: [(frame: Int, dx: Int, dy: Int)] = []
@@ -28,8 +32,12 @@ struct KickstartProbe {
             else if paths[0] == "--adf" { adfPath = paths[1] }
             else if paths[0] == "--hdf" { hardDiskPath = paths[1] }
             else if paths[0] == "--hdf-out" { hardDiskOutput = paths[1] }
+            else if paths[0] == "--ext" { extendedROMPath = paths[1] }
             else if paths[0] == "--fast", let value = Int(paths[1]), value >= 0 { fastRAM = value << 20 }
             else if paths[0] == "--trace", let value = Int(paths[1]), value >= 0 { trace = value }
+            else if paths[0] == "--wild", let value = Int(paths[1]), value > 0 { history = value }
+            else if paths[0] == "--exceptions", let value = Int(paths[1]) { exceptionsFrom = value }
+            else if paths[0] == "--watch", let (frame, address) = Self.watchpoint(paths[1]) { watch = (address, frame) }
             else if paths[0] == "--chip", let value = Int(paths[1]), [512, 1024, 2048].contains(value) { chipRAM = value << 10 }
             else if paths[0] == "--key", let (frame, key) = Self.keyPress(paths[1]) { presses.append((frame, key)) }
             else if paths[0] == "--fire", let frame = Int(paths[1]) { fires.append(frame) }
@@ -41,13 +49,18 @@ struct KickstartProbe {
             paths.removeFirst(2)
         }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--fast MiB] [--chip 512|1024|2048] [--trace N] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--ext EXTENDED.rom] [--fast MiB] [--chip 512|1024|2048] [--trace N] [--wild N] [--exceptions FRAME] [--watch FRAME:HEXADDRESS] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
             let bytes = try Data(contentsOf: URL(fileURLWithPath: path))
-            let hardDisk = try hardDiskPath.map { try HardDisk(image: Array(try Data(contentsOf: URL(fileURLWithPath: $0)))) }
-            var machine = try AmigaMachine(kickstart: Array(bytes), chipRAMSize: chipRAM, fastRAMSize: fastRAM, hardDisk: hardDisk)
+            // As in the app, an image file that cannot be written is a write-protected disk.
+            let hardDisk = try hardDiskPath.map {
+                try HardDisk(image: Array(try Data(contentsOf: URL(fileURLWithPath: $0))),
+                             writeProtected: !FileManager.default.isWritableFile(atPath: $0))
+            }
+            let extendedROM = try extendedROMPath.map { Array(try Data(contentsOf: URL(fileURLWithPath: $0))) } ?? []
+            var machine = try AmigaMachine(kickstart: Array(bytes), extendedROM: extendedROM, chipRAMSize: chipRAM, fastRAMSize: fastRAM, hardDisk: hardDisk)
             if let adfPath {
                 try machine.memory.insertDisk(adf: Array(try Data(contentsOf: URL(fileURLWithPath: adfPath))))
                 print("DF0: \(URL(fileURLWithPath: adfPath).lastPathComponent)")
@@ -60,7 +73,79 @@ struct KickstartProbe {
             var pending = moves.map { (dx: $0.dx, dy: $0.dy) }
             do {
                 var frame = -1
+                // With --wild: the last instructions executed, to show how the PC left the
+                // 24-bit address space or got into the mirrors of chip RAM (which no program
+                // does on purpose).
+                var recent = [(pc: UInt32, sr: UInt16, a7: UInt32)](repeating: (0, 0, 0), count: history)
+                // With --exceptions: the handler addresses of vectors 2–11 (bus error … line F),
+                // re-read every frame, and how many times one was entered and reported.
+                var handlers: [UInt32] = []
+                var reported = 0
+                // With --watch: the long word at an address in RAM, and the changes reported.
+                var watched: UInt32?
+                var changes = 0
                 for _ in 0..<limit {
+                    if let watch, frame >= watch.fromFrame, changes < 20 {
+                        let before = machine.cpu.programCounter, cpu = machine.cpu
+                        try machine.step()
+                        completed += 1
+                        let value = (try? machine.memory.readLong(at: watch.address)) ?? 0
+                        if let old = watched, old != value {
+                            changes += 1
+                            let registers = (0..<8).map { String(format: "%08X", cpu[address: $0]) }.joined(separator: " ")
+                            let words = (0..<3).map { String(format: "%04X", (try? machine.memory.readWord(at: before &+ UInt32($0 * 2))) ?? 0) }
+                            let custom = machine.memory.custom
+                            print(String(format: "$%06X changed from $%08X to $%08X in frame %d during the instruction at $%08X: %@ A: %@", watch.address, old, value,
+                                         machine.memory.video.frameCount, before, words.joined(separator: " "), registers))
+                            print(String(format: "  Blitter: BLTCON0=$%04X BLTCON1=$%04X BLTSIZE=$%04X C=$%06X B=$%06X A=$%06X D=$%06X; DSKPT=$%06X DMACON=$%04X",
+                                         custom.register(0x40), custom.register(0x42), custom.register(0x58), custom.blitterPointers[0], custom.blitterPointers[1],
+                                         custom.blitterPointers[2], custom.blitterPointers[3], custom.diskPointer, custom.dmacon))
+                        }
+                        watched = value
+                        frame = machine.memory.video.frameCount
+                        continue
+                    }
+                    if let from = exceptionsFrom, frame >= from, reported < 40 {
+                        let before = machine.cpu.programCounter, wasSupervisor = machine.cpu.statusRegister & 0x2000 != 0
+                        let stack = machine.cpu.supervisorStackPointer
+                        if history > 0 { recent[completed % history] = (before, machine.cpu.statusRegister, machine.cpu[address: 7]) }
+                        try machine.step()
+                        completed += 1
+                        let after = machine.cpu.programCounter
+                        if machine.cpu.supervisorStackPointer < stack, let vector = handlers.firstIndex(of: after), vector != 6, after &- before > 10 { // not 8, privilege: AROS's way into supervisor mode
+                            reported += 1
+                            if reported == 1, history > 0 { // how the first one came about
+                                for index in 0..<history {
+                                    let entry = recent[(completed + index) % history]
+                                    let words = (0..<3).map { String(format: "%04X", (try? machine.memory.readWord(at: entry.pc &+ UInt32($0 * 2))) ?? 0) }
+                                    print(String(format: "  $%08X: %@  SR=%04X A7=%08X", entry.pc, words.joined(separator: " "), entry.sr, entry.a7))
+                                }
+                            }
+                            let words = (0..<3).map { String(format: "%04X", (try? machine.memory.readWord(at: before &+ UInt32($0 * 2))) ?? 0) }
+                            let data = (0..<8).map { String(format: "%08X", machine.cpu[data: $0]) }.joined(separator: " ")
+                            let address = (0..<7).map { String(format: "%08X", machine.cpu[address: $0]) }.joined(separator: " ")
+                            print(String(format: "Vector %d taken in frame %d at $%08X: %@ (%@ mode) SSP=$%08X USP=$%08X D: %@ A: %@", vector + 2, frame, before,
+                                         words.joined(separator: " "), wasSupervisor ? "supervisor" : "user", stack, machine.cpu.userStackPointer, data, address))
+                        }
+                        if machine.memory.video.frameCount != frame {
+                            frame = machine.memory.video.frameCount
+                            handlers = (2...11).map { (try? machine.memory.readLong(at: UInt32($0 * 4))) ?? 0 }
+                        }
+                        continue
+                    }
+                    if history > 0 {
+                        let pc = machine.cpu.programCounter
+                        if pc > 0xFF_FFFF || (pc >= UInt32(chipRAM) && pc < 0x20_0000) {
+                            print(String(format: "PC left the address space or entered the mirrors of chip RAM after %d instructions, in frame %d. Last %d instructions:", completed, frame, history))
+                            for index in 0..<history {
+                                let entry = recent[(completed + index) % history]
+                                let words = (0..<3).map { String(format: "%04X", (try? machine.memory.readWord(at: entry.pc &+ UInt32($0 * 2))) ?? 0) }
+                                print(String(format: "  $%08X: %@  SR=%04X A7=%08X", entry.pc, words.joined(separator: " "), entry.sr, entry.a7))
+                            }
+                            break
+                        }
+                        recent[completed % history] = (pc, machine.cpu.statusRegister, machine.cpu[address: 7])
+                    }
                     try machine.step()
                     completed += 1
                     guard machine.memory.video.frameCount != frame else { continue }
@@ -123,7 +208,7 @@ struct KickstartProbe {
                     let type = String(format: "$%08X", partition.dosType)
                     return "\(partition.name) (DosType \(type), blocks \(partition.firstBlock)-\(partition.firstBlock + partition.blockCount - 1), boot priority \(partition.bootPriority))"
                 }
-                print("Hard disk \(hardDisk.isPartitioned ? "with partition table" : "hardfile"): " + partitions.joined(separator: ", "))
+                print("Hard disk \(hardDisk.isPartitioned ? "with partition table" : "hardfile")\(hardDisk.isWriteProtected ? ", write-protected" : ""): " + partitions.joined(separator: ", "))
                 print("Hard disk: \(hardDisk.blocksRead) blocks read, \(hardDisk.blocksWritten) written")
                 if let hardDiskOutput {
                     try Data(hardDisk.bytes).write(to: URL(fileURLWithPath: hardDiskOutput))
@@ -183,6 +268,13 @@ struct KickstartProbe {
         let parts = text.split(separator: ":")
         guard parts.count == 2, let frame = Int(parts[0]), let key = UInt8(parts[1], radix: 16) else { return nil }
         return (frame, key)
+    }
+
+    /// Parses `FRAME:HEXADDRESS`, e.g. `11000:4`.
+    static func watchpoint(_ text: String) -> (Int, UInt32)? {
+        let parts = text.split(separator: ":")
+        guard parts.count == 2, let frame = Int(parts[0]), let address = UInt32(parts[1], radix: 16) else { return nil }
+        return (frame, address)
     }
 
     /// Parses `count` integers separated by colons, e.g. `23000:40:-12`.
