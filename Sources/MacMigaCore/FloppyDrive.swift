@@ -33,6 +33,9 @@ public struct FloppyDrive: Equatable, Sendable {
     public private(set) var diskChanged = true
     /// Word position of the read head within the rotating MFM track.
     var rotation = 0
+    /// Counts drive activity (motor switched on, head steps, disk DMA transfers), so a host
+    /// can tell when the disk is busy.
+    public internal(set) var activity = 0
     private var previousControl: UInt8 = 0xFF
 
     public init(disk: [UInt8]? = nil, rawTracks: [Int: [UInt16]] = [:]) {
@@ -130,10 +133,14 @@ public struct FloppyDrive: Equatable, Sendable {
     /// Applies a new CIA-B port B value.
     mutating func control(_ value: UInt8) {
         let select = value & 0x08 == 0
-        if select && previousControl & 0x08 != 0 { motorOn = value & 0x80 == 0 }
+        if select && previousControl & 0x08 != 0 {
+            if !motorOn && value & 0x80 == 0 { activity &+= 1 }
+            motorOn = value & 0x80 == 0
+        }
         selected = select
         side = value & 0x04 == 0 ? 1 : 0
         if select && previousControl & 0x01 != 0 && value & 0x01 == 0 {
+            activity &+= 1
             if value & 0x02 != 0 { cylinder = max(cylinder - 1, 0) }
             else { cylinder = min(cylinder + 1, Self.cylinders - 1) }
             if hasDisk { diskChanged = false }
@@ -222,6 +229,7 @@ extension AmigaMemory {
         typealias R = CustomChips.Register
         guard custom.diskDMAPending, custom.dmacon & 0x0210 == 0x0210 else { return }
         custom.diskDMAPending = false
+        drive.activity &+= 1
         let length = Int(custom.register(R.dsklen) & 0x3FFF)
         if custom.register(R.dsklen) & 0x4000 == 0 {
             let track = drive.selected ? drive.currentTrack().flatMap { $0.isEmpty ? nil : $0 } : nil

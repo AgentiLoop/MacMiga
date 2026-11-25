@@ -106,7 +106,11 @@ Machine ▸ 1 MB Chip RAM (ECS Agnus) doubles chip RAM and swaps the Agnus (same
 rules; see "Chip RAM and the ECS Agnus"). Machine ▸ Warp Speed (⌘T) runs the
 emulation as fast as the Mac allows instead of at 50 frames a second, without
 sound, which shortens long loading times; the window title shows "warp". It is
-off at every launch unless the app is started with `-Warp YES`.
+off at every launch unless the app is started with `-Warp YES`. Machine ▸
+Instant Load (Skip Disk Wait) (⌘L, on by default and remembered) runs at warp
+speed only while the floppy is busy: while its motor is on and the drive has
+stepped, spun up or transferred data within the last emulated second. Sound is
+skipped during those stretches, as with Warp Speed.
 
 With no arguments it reuses the last ROM, or `Kickstart ROMs/kickstart-1.3.rom`
 in the current folder, or asks for one. The Machine menu opens a Kickstart ROM

@@ -122,6 +122,25 @@ final class Emulator {
     /// sound. Not remembered between launches; `-Warp YES` on the command line starts with it on.
     var warp = UserDefaults.standard.bool(forKey: "Warp")
 
+    /// Instant Load: run at warp speed while the floppy is busy (motor on and the drive used
+    /// within the last emulated second), then return to normal speed. Remembered; on by default.
+    var instantLoad = UserDefaults.standard.object(forKey: "InstantLoad") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(instantLoad, forKey: "InstantLoad") }
+    }
+    private var diskActivity = 0, diskActivityFrame = 0
+
+    /// True while Instant Load should run the machine at warp speed.
+    func diskBusy() -> Bool {
+        guard instantLoad, let memory = machine?.memory else { return false }
+        if memory.drive.activity != diskActivity {
+            diskActivity = memory.drive.activity
+            diskActivityFrame = memory.video.frameCount
+        }
+        // The frame count restarts with a new machine, so a negative age counts as idle.
+        let age = memory.video.frameCount - diskActivityFrame
+        return memory.drive.motorOn && age >= 0 && age < 50
+    }
+
     /// Runs until the chipset completes one more frame (bounded so a bug cannot hang the UI).
     /// With `playAudio` false the frame's sound is discarded.
     func runFrame(playAudio: Bool = true) {
@@ -476,10 +495,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { emulator.saveHardDisk() }
 
     private func tick() {
-        if emulator.warp {
+        if emulator.warp || emulator.diskBusy() {
             // As many frames as fit in 15 ms of each 20 ms tick, so the window stays responsive.
             let deadline = Date().addingTimeInterval(0.015)
-            repeat { emulator.runFrame(playAudio: false) } while emulator.machine != nil && Date() < deadline
+            repeat { emulator.runFrame(playAudio: false) }
+                while emulator.machine != nil && Date() < deadline && (emulator.warp || emulator.diskBusy())
         } else {
             emulator.runFrame()
         }
@@ -642,6 +662,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sender.state = emulator.warp ? .on : .off
         updateTitle()
     }
+    @objc func toggleInstantLoad(_ sender: NSMenuItem) {
+        emulator.instantLoad.toggle()
+        sender.state = emulator.instantLoad ? .on : .off
+    }
     @objc func toggleBigChipRAM(_ sender: NSMenuItem) {
         do { try emulator.setBigChipRAM(!emulator.bigChipRAM) } catch { alert("Reset failed: \(error)") }
         sender.state = emulator.bigChipRAM ? .on : .off
@@ -706,6 +730,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         machine.addItem(withTitle: "Reset", action: #selector(resetMachine), keyEquivalent: "r")
         let warp = machine.addItem(withTitle: "Warp Speed", action: #selector(toggleWarp(_:)), keyEquivalent: "t")
         warp.state = emulator.warp ? .on : .off
+        let instant = machine.addItem(withTitle: "Instant Load (Skip Disk Wait)", action: #selector(toggleInstantLoad(_:)),
+                                      keyEquivalent: "l")
+        instant.state = emulator.instantLoad ? .on : .off
         machine.addItem(.separator())
         let cursor = machine.addItem(withTitle: "Arrow Keys Control Joystick (Port 2)",
                                      action: #selector(toggleCursorJoystick(_:)), keyEquivalent: "j")
