@@ -771,7 +771,8 @@ test suite (LhA 1.22 for Amiga, LHArc 1.13c and LArc 3.33, kept in
 `Tests/MacMigaCoreTests/Fixtures/LHA` under Lhasa's ISC license): every member
 passes its CRC, `-lh1-` and `-lz5-` unpack to the same text as the stored
 archive's, a 1.2 MB `-lh1-` file exercises the adaptive code's rebuilds, and a
-crafted `-lz5-` archive copies all of LArc's initial window. For archives made on an Amiga the protection bits and
+crafted `-lz5-` archive copies all of LArc's initial window. No `-lzs-` archive was at
+hand; that decoder follows Lhasa's and is checked with a hand-made stream. For archives made on an Amiga the protection bits and
 file comments are kept.
 
 Checked on November 25, 2026 with Kickstart 3.1 and the probe:

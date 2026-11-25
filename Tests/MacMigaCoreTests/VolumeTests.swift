@@ -602,3 +602,20 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
     cut.removeLast(200)
     #expect(throws: LHAError.truncated) { try LHA.unpack(cut) }
 }
+
+@Test func larcLZSStreamUnpacks() throws {
+    // Literals "A" and "B" (written at 2031 and 2032 of the 2 KiB window), a copy of 6 bytes
+    // from 2031 that runs into its own output, and 2 bytes from 0, still spaces.
+    var bits: [Int] = []
+    func put(_ value: Int, _ count: Int) { for shift in stride(from: count - 1, through: 0, by: -1) { bits.append(value >> shift & 1) } }
+    put(1, 1); put(0x41, 8)
+    put(1, 1); put(0x42, 8)
+    put(0, 1); put(2031, 11); put(6 - 2, 4)
+    put(0, 1); put(0, 11); put(2 - 2, 4)
+    let packed = stride(from: 0, to: bits.count, by: 8).map { start in
+        (0..<8).reduce(UInt8(0)) { $0 << 1 | UInt8(start + $1 < bits.count ? bits[start + $1] : 0) }
+    }
+    let original = Array("ABABABAB  ".utf8)
+    #expect(try LHA.unpack(member(level: 0, method: "-lzs-", name: Array("f".utf8), packed: packed, original: original))
+        .first?.contents == original)
+}
