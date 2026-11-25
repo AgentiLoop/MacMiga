@@ -844,6 +844,9 @@ and 512 KiB of expansion memory:
 | without `PRELOAD` | the game started, and after two fire presses F10 returned to the `1>` prompt in the same way |
 | 1, 2 or 4 MiB fast RAM | the game started |
 | no fast RAM (512 KiB chip + 512 KiB slow) | WHDLoad's own requester: "Can't allocate ExpMem." with Retry and Cancel |
+| 1 MiB chip (the ECS Agnus option) and 8 MiB fast RAM, the disk from `MakeHardfile --auto` | the game started and ran from fast RAM, 672 blocks read, the same display registers and palette |
+| 1 MiB chip, no fast RAM (512 KiB slow) | "Can't allocate ExpMem." again: the slave's 512 KiB of base memory and 512 KiB of expansion memory do not both fit beside Kickstart's own use of chip memory (524 KB of chip free) |
+| 2 MiB chip (`--chip 2048`), no fast RAM | the game started and ran from chip memory (PC at `$17F2F2`) |
 | 1 MiB chip RAM (ECS Agnus), 8 MiB fast RAM | the game started as with 512 KiB |
 
 No install that needs more than 512 KiB of chip memory was at hand, so a copy
