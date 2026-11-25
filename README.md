@@ -48,13 +48,17 @@ Swift errors are not yet translated into CPU bus/address-error exceptions.
 `Sources/MacMigaCore/MC68000.swift` implements D0–D7, A0–A7, banked
 user/supervisor stack pointers, status bits, and external reset-vector loading.
 The supported instructions are MOVE.B/W/L, MOVEA.W/L, LEA, JMP, JSR, MOVEQ,
-ADD/ADDA/ADDQ, SUB/SUBA/SUBQ, NOP, BRA, BSR, all 14 Bcc conditions, and RTS.
+ADD/ADDA/ADDQ, SUB/SUBA/SUBQ, CMP/CMPA/CMPI, DBcc, NOP, BRA, BSR, all 14 Bcc
+conditions, and RTS.
 MOVE supports register direct,
 indirect, postincrement, predecrement, displacement, brief indexed, absolute,
 PC-relative source, and immediate source addressing. LEA, JMP, and JSR accept
 only control addressing modes and preserve condition codes. ADD and SUB set
 X, N, Z, V, and C; address-register destinations (ADDA/SUBA and ADDQ/SUBQ to
 An) use all 32 bits and leave flags unchanged. ADDX/SUBX are not implemented.
+Compares set N, Z, V, and C and leave X unchanged; CMPA compares all 32 bits
+with a sign-extended word source. CMPM is not implemented. DBcc decrements only
+the low word of Dn and leaves flags unchanged.
 Branches support byte and word displacements. Unsupported opcodes throw an
 opcode/address diagnostic.
 
@@ -68,7 +72,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-Forty-seven tests cover the memory foundation and CPU subset. Coverage includes
+Fifty-five tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -76,7 +80,10 @@ legal LEA/JMP/JSR mode across CCR and stack banks, invalid encodings, A7
 aliasing, JSR stack faults, and PC wrap. Arithmetic tests check exhaustive
 byte ADD/SUB and word/long boundary values against an independent wide-integer
 flag reference, every ADDQ/SUBQ value and size, address-register forms, memory
-read-modify-write, invalid encodings, and faults. Existing exhaustive MOVEQ and branch
+read-modify-write, invalid encodings, and faults. Compare tests check exhaustive
+byte CMP and word/long/CMPA boundaries against a wide-integer reference, CMPI
+sizes and memory destinations, and DBcc counting, conditions, and faults.
+Existing exhaustive MOVEQ and branch
 condition tests remain. Synthetic programs exercise calls and memory copying.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
@@ -94,23 +101,24 @@ The probe stops at the first diagnostic or after 10,000 instructions; reaching
 the limit does not establish boot success. The two local files tested on
 November 25, 2026 were each 524,288 bytes. Their measured startup results:
 
-| File | Reset PC | First unsupported opcode | Completed instructions |
+| File | Reset PC | Stop point | Completed instructions |
 | --- | --- | --- | --- |
-| kickstart-1.3.rom | $00FC00D2 | $B1C9 (CMPA.L) at $00FC00EC | 262,148 |
-| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | $51C9 (DBF) at $00F800E6 | 7 |
+| kickstart-1.3.rom | $00FC00D2 | CMPI.W at $00FC00F4 reads unmapped $F00000 | 262,151 |
+| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | CMPI.W at $00F80100 reads unmapped $F00000 | 429,164 |
 
-Kickstart 1.3 exceeds the probe's 10,000-instruction limit inside a startup
-countdown loop; its stop point above was measured with a separate local run
-without that limit.
+Both ROMs now exceed the probe's 10,000-instruction limit inside startup delay
+loops; the stop points above were measured with a separate local run without
+that limit. Both stop on a memory error, not an unsupported opcode: they read
+`$F00000`, which this memory map does not decode yet.
 
 Neither ROM booted. The probe reports raw reset-vector values and does not
 validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. Extend CPU execution with compare and DBcc (CMPA/CMP and DBF are the next
-   opcodes the local ROMs reach), then logic, shifts, remaining instructions,
-   exceptions, interrupts, and timing.
+1. Decode the `$F00000`–`$F7FFFF` region both ROMs probe next, then continue
+   CPU work (logic, shifts, remaining instructions, exceptions, interrupts, timing)
+   as the ROMs reach new opcodes.
 2. CIA-A/B registers and timers, real overlay control, interrupt routing.
 3. OCS custom chips: raster timing, DMA, bitplanes, Copper, Blitter, and audio.
 4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
