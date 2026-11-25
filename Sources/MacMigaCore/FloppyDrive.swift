@@ -58,10 +58,16 @@ public struct FloppyDrive: Equatable, Sendable {
     static func parse(_ image: [UInt8]) throws -> ([UInt8], [Int: [UInt16]]) {
         func word(_ offset: Int) -> Int { Int(image[offset]) << 8 | Int(image[offset + 1]) }
         func long(_ offset: Int) -> Int { word(offset) << 16 | word(offset + 2) }
-        func bytes(_ offset: Int, _ count: Int) -> [UInt8] {
-            let end = min(offset + count, image.count)
-            let slice = offset < end ? Array(image[offset..<end]) : []
-            return slice + [UInt8](repeating: 0, count: count - slice.count)
+        /// A track's stored bytes; a track that runs past the end of the file (other than a
+        /// raw `UAE--ADF` track, below), or an AmigaDOS track shorter than 11 sectors, makes
+        /// the image invalid.
+        func bytes(_ offset: Int, _ count: Int) throws -> [UInt8] {
+            guard count >= 0, offset + count <= image.count else { throw FloppyError.invalidExtendedADF }
+            return Array(image[offset..<offset + count])
+        }
+        func dos(_ offset: Int, _ length: Int) throws -> [UInt8] {
+            guard length >= trackSize else { throw FloppyError.invalidExtendedADF }
+            return try bytes(offset, trackSize)
         }
         func words(_ data: [UInt8]) -> [UInt16] {
             stride(from: 0, to: data.count - 1, by: 2).map { UInt16(data[$0]) << 8 | UInt16(data[$0 + 1]) }
@@ -81,9 +87,11 @@ public struct FloppyDrive: Equatable, Sendable {
             for track in 0..<160 {
                 let sync = word(8 + track * 4), length = word(10 + track * 4)
                 if sync == 0 {
-                    store(dos: bytes(offset, trackSize), track: track)
+                    store(dos: try dos(offset, length), track: track)
                 } else {
-                    raw[track] = [UInt16(sync)] + words(bytes(offset, length))
+                    // Some images end a few bytes short inside their last raw track
+                    // (Turrican's, by 192 bytes); the stored part is used.
+                    raw[track] = [UInt16(sync)] + words(try bytes(offset, max(0, min(length, image.count - offset))))
                 }
                 offset += length
             }
@@ -98,10 +106,12 @@ public struct FloppyDrive: Equatable, Sendable {
                 let header = 12 + track * 12
                 let type = word(header + 2), length = long(header + 4), bits = long(header + 8)
                 if type == 0 {
-                    store(dos: bytes(offset, trackSize), track: track)
+                    store(dos: try dos(offset, length), track: track)
                 } else {
                     let used = bits > 0 ? min((bits + 15) / 16 * 2, length) : length
-                    raw[track] = words(bytes(offset, used))
+                    guard used >= 2 else { throw FloppyError.invalidExtendedADF }
+                    raw[track] = words(try bytes(offset, used))
+                    guard offset + length <= image.count else { throw FloppyError.invalidExtendedADF }
                 }
                 offset += length
             }
@@ -212,9 +222,12 @@ extension AmigaMemory {
         custom.diskDMAPending = false
         let length = Int(custom.register(R.dsklen) & 0x3FFF)
         if custom.register(R.dsklen) & 0x4000 == 0 {
-            let track = drive.selected ? drive.currentTrack() : nil
+            let track = drive.selected ? drive.currentTrack().flatMap { $0.isEmpty ? nil : $0 } : nil
             var position = drive.rotation
             if let track {
+                // Tracks differ in length (raw tracks of extended ADFs), so the position
+                // carried over from another track is brought within this one.
+                position %= track.count
                 if custom.adkcon & 0x0400 != 0 {
                     let sync = custom.register(R.dsksync)
                     guard let found = (0..<track.count).first(where: {

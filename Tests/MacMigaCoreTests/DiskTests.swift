@@ -137,3 +137,36 @@ private func startDiskRead(_ memory: inout AmigaMemory, words: UInt16, sync: Boo
     #expect(drive.disk == adf && drive.rawTracks.isEmpty)
     #expect(throws: FloppyError.invalidADFSize(1000)) { try drive.insert(adf: [UInt8](repeating: 0, count: 1000)) }
 }
+
+@Test func damagedExtendedADFsAreRejectedAndShortRawTracksAreReadSafely() throws {
+    let adf = patternADF()
+    func old(rawLength: Int = 4, dosLength: Int = 0x1600, cut: Int = 0) -> [UInt8] {
+        var image = Array("UAE--ADF".utf8)
+        for track in 0..<160 {
+            image += track == 0 ? [0x44, 0x89, UInt8(rawLength >> 8), UInt8(rawLength & 0xFF)]
+                : [0, 0, UInt8(dosLength >> 8), UInt8(dosLength & 0xFF)]
+        }
+        image += [UInt8](repeating: 0xAA, count: rawLength)
+        for track in 1..<160 { image += Array(adf[track * 5632..<track * 5632 + min(dosLength, 5632)]) + [UInt8](repeating: 0, count: max(0, dosLength - 5632)) }
+        return Array(image.dropLast(cut))
+    }
+    var drive = FloppyDrive()
+    try drive.insert(adf: old())
+    // A track running past the end of the file, or an AmigaDOS track shorter than 11 sectors.
+    #expect(throws: FloppyError.invalidExtendedADF) { try drive.insert(adf: old(cut: 1)) }
+    #expect(throws: FloppyError.invalidExtendedADF) { try drive.insert(adf: old(dosLength: 512)) }
+    // A UAE-1ADF track claiming 4 GB of data is rejected without being allocated.
+    var new = Array("UAE-1ADF".utf8) + [0, 0, 0, 1]
+    new += [0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xF0, 0, 0, 0, 0] + [0x44, 0x89]
+    #expect(throws: FloppyError.invalidExtendedADF) { try drive.insert(adf: new) }
+
+    // Track 0 is raw and 3 words long; a read starting with the head position left from a
+    // longer track wraps within it.
+    var memory = try driveMemory(disk: false)
+    try memory.insertDisk(adf: old(rawLength: 4))
+    memory.drive.rotation = 5000
+    try startDiskRead(&memory, words: 6, sync: false)
+    #expect(memory.custom.intreq & 0x0002 != 0)
+    let read = try (0..<6).map { try memory.readWord(at: 0x10000 + UInt32($0 * 2)) }
+    #expect(Set(read) == [0x4489, 0xAAAA])
+}
