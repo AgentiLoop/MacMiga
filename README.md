@@ -2,8 +2,9 @@
 
 A work-in-progress Commodore Amiga 500 emulator for macOS.
 
-**Current milestone: memory foundation only.** There is no CPU instruction
-execution or application UI yet. MacMiga does not boot AmigaOS or run games.
+**Current milestone: memory and initial CPU execution.** The core executes a
+small MC68000 instruction subset, but has no application UI, chipset, or
+peripherals yet. MacMiga does not boot AmigaOS or run games.
 
 ## Build and test
 
@@ -42,17 +43,34 @@ behavior, DMA arbitration, and cycle timing remain unimplemented. Multiword
 writes happen in order and are not rolled back if a subsequent access fails.
 Swift errors are not yet translated into CPU bus/address-error exceptions.
 
+## CPU subset
+
+`Sources/MacMigaCore/MC68000.swift` implements D0–D7, A0–A7, banked
+user/supervisor stack pointers, status bits, and external reset-vector loading.
+The supported instructions are MOVEQ, NOP, BRA, BSR, all 14 Bcc conditions,
+and RTS. Branches support byte and word displacements. Unsupported opcodes
+throw a diagnostic containing the opcode and instruction address.
+
+This is functional stepping, not cycle-accurate emulation. Prefetch, interrupts,
+trace and other exceptions, and the remaining instruction set are absent.
+CPU registers remain unchanged on a thrown error, but earlier bus writes are
+not rolled back. Odd branch targets fail on the next fetch. Initial register
+values are deterministic host defaults, not hardware power-on guarantees.
+
 ## Tests
 
-Ten tests cover ROM-size rejection, reset vectors and RAM retention, both ROM
-sizes, ROM write protection, byte order, memory boundaries, 24-bit aliases,
-address wraparound, alignment faults, and explicit unsupported-address errors.
+Twenty tests cover the memory foundation and CPU subset. CPU coverage includes
+all 256 MOVEQ immediates across eight registers and both X states, every Bcc
+condition across all 32 CCR values and both displacement lengths, stack banks,
+subroutine returns, displacement limits, unsupported opcodes, and memory faults.
+A synthetic ROM executes after reset; a synthetic RAM program calls and returns.
 Debug and release builds/tests passed on November 25, 2026 using Swift 6.4.2.
 These tests establish the implemented contract, not Amiga software compatibility.
 
 ## Next milestones
 
-1. MC68000 register state, instruction execution, exceptions, and CPU tests.
+1. Extend CPU execution with effective-address decoding and MOVE/MOVEA, then
+   arithmetic, exceptions, interrupts, and timing.
 2. CIA-A/B registers and timers, real overlay control, interrupt routing.
 3. OCS custom chips: raster timing, DMA, bitplanes, Copper, Blitter, and audio.
 4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
@@ -61,7 +79,9 @@ These tests establish the implemented contract, not Amiga software compatibility
 
 ## Hardware references
 
-- Commodore-Amiga, *Amiga Hardware Reference Manual*, Appendix D (system
-  address map). Reserved/extended regions are not implemented in this milestone.
-- Motorola/Freescale, *M68000 8-/16-/32-Bit Microprocessors User's Manual*,
-  reset operation and address-error sections (document MC68000UM).
+Commodore-Amiga, *Amiga Hardware Reference Manual*, Appendix D (system address
+map). Reserved/extended regions are not implemented in this milestone.
+Motorola/Freescale, *M68000 8-/16-/32-Bit Microprocessors User's Manual*
+(MC68000UM), reset operation and address-error sections.
+Motorola, *M68000 Family Programmer's Reference Manual* (M68000PRM),
+integer instructions: MOVEQ, NOP, Bcc, BRA, BSR, and RTS.
