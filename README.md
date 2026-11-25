@@ -105,8 +105,10 @@ MOVE USP, LINK/UNLK, Scc, DBcc, Bcc/BRA/BSR, RTS, RTR, RTE, TRAP, TRAPV, RESET
 (no device reset), STOP, NOP, ABCD/SBCD/NBCD (N and V follow the undocumented
 68000 results as Musashi computes them), CHK.W (trap 6 with N set for a negative
 register; Z/V/C cleared) and MOVEP.W/.L. This completes the 68000 instruction set;
-unassigned encodings still stop emulation with `CPUError.unsupportedInstruction`
-rather than taking the illegal-instruction exception.
+unassigned encodings and invalid addressing modes take the illegal-instruction
+exception (vector 4, stacked PC = the opcode's address), as on hardware. Setting
+`cpu.stopsOnIllegalInstruction = true` makes `step` throw
+`CPUError.unsupportedInstruction` instead, which the decoder tests use.
 MOVE supports register direct,
 indirect, postincrement, predecrement, displacement, brief indexed, absolute,
 PC-relative source, and immediate source addressing. LEA, JMP, and JSR accept
