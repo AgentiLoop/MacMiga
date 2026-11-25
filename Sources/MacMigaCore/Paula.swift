@@ -47,16 +47,29 @@ public struct Paula: Equatable, Sendable {
 }
 
 extension AmigaMemory {
-    /// Advances all four channels by one colour clock and feeds the box-filtered mix
-    /// into the host sample stream.
-    mutating func stepAudio() {
-        let dmaMaster = custom.dmacon & 0x0200 != 0
-        if audio.anyPlaying || (dmaMaster && custom.dmacon & 0x000F != 0) || custom.audioDataWritten != 0 {
-            stepChannels(dmaMaster: dmaMaster)
-        } else {
-            mixVolumes()
+    /// Advances all four channels by `colorClocks` and feeds the box-filtered mix into the
+    /// host sample stream. The clocks up to the next change of a channel's output are taken
+    /// in one step; the result is the same as stepping one colour clock at a time.
+    mutating func stepAudio(colorClocks: Int) {
+        var remaining = colorClocks
+        while remaining > 0 {
+            let dmaMaster = custom.dmacon & 0x0200 != 0
+            var count = remaining
+            if audio.anyPlaying || (dmaMaster && custom.dmacon & 0x000F != 0) || custom.audioDataWritten != 0 {
+                stepChannels(dmaMaster: dmaMaster)
+                // Nothing changes until a playing channel's period counter runs out.
+                for index in 0..<4 where audio.channels[index].playing {
+                    count = min(count, audio.channels[index].countdown)
+                }
+                for index in 0..<4 where audio.channels[index].playing {
+                    audio.channels[index].countdown -= count - 1
+                }
+            } else {
+                mixVolumes()
+            }
+            finishAudioStep(colorClocks: count)
+            remaining -= count
         }
-        finishAudioStep()
     }
 
     private mutating func stepChannels(dmaMaster: Bool) {
@@ -125,22 +138,29 @@ extension AmigaMemory {
         audio.right = right
     }
 
-    /// Box-filters the mix down to the host rate.
-    private mutating func finishAudioStep() {
-        audio.sumLeft += audio.left
-        audio.sumRight += audio.right
-        audio.sumCount += 1
-        audio.phase += audio.sampleRate
-        if audio.phase >= Paula.colorClockRate {
-            audio.phase -= Paula.colorClockRate
-            if audio.samples.count < audio.capacity * 2 {
-                let scale = Float(audio.sumCount) * 16384
-                audio.samples.append(Float(audio.sumLeft) / scale)
-                audio.samples.append(Float(audio.sumRight) / scale)
+    /// Box-filters `colorClocks` of the current mix down to the host rate.
+    private mutating func finishAudioStep(colorClocks: Int) {
+        var remaining = colorClocks
+        while remaining > 0 {
+            // Colour clocks until the next host sample is due.
+            let untilSample = (Paula.colorClockRate - audio.phase + audio.sampleRate - 1) / audio.sampleRate
+            let count = min(remaining, max(untilSample, 1))
+            remaining -= count
+            audio.sumLeft += audio.left * count
+            audio.sumRight += audio.right * count
+            audio.sumCount += count
+            audio.phase += audio.sampleRate * count
+            if audio.phase >= Paula.colorClockRate {
+                audio.phase -= Paula.colorClockRate
+                if audio.samples.count < audio.capacity * 2 {
+                    let scale = Float(audio.sumCount) * 16384
+                    audio.samples.append(Float(audio.sumLeft) / scale)
+                    audio.samples.append(Float(audio.sumRight) / scale)
+                }
+                audio.sumLeft = 0
+                audio.sumRight = 0
+                audio.sumCount = 0
             }
-            audio.sumLeft = 0
-            audio.sumRight = 0
-            audio.sumCount = 0
         }
     }
 

@@ -68,22 +68,36 @@ extension AmigaMemory {
         return UInt16(chipRAM[index]) << 8 | UInt16(chipRAM[index + 1])
     }
 
-    /// Advances the beam one colour clock at a time, running the Copper and drawing each
-    /// line as it ends. Returns lines and frames completed (CIA TOD inputs).
+    /// Advances the beam, running the Copper and drawing each line as it ends. Colour clocks
+    /// in which the Copper only counts down are taken in one step, up to the end of the
+    /// line; the result is the same as stepping one colour clock at a time.
+    /// Returns lines and frames completed (CIA TOD inputs).
     @discardableResult
     public mutating func advanceChipset(colorClocks: Int) -> (lines: Int, frames: Int) {
         var lines = 0, frames = 0
-        for _ in 0..<colorClocks {
+        var remaining = colorClocks
+        while remaining > 0 {
             if custom.copperJump != 0 {
                 copper.jump(to: custom.copperLocation(custom.copperJump))
                 custom.copperJump = 0
             }
-            if custom.dmacon & 0x0280 == 0x0280 { stepCopper() }
+            var count = min(remaining, CustomChips.colorClocksPerLine - custom.horizontalPosition)
+            if custom.dmacon & 0x0280 == 0x0280 {
+                let idle = copperIdleClocks(limit: count)
+                if idle > 0 {
+                    count = idle
+                    copper.busy = max(copper.busy - idle, 0)
+                } else {
+                    count = 1
+                    stepCopper()
+                }
+            }
             if custom.blitPending { runPendingBlit() }
             if custom.diskDMAPending { runPendingDiskDMA() }
-            stepAudio()
+            stepAudio(colorClocks: count)
+            remaining -= count
             let line = custom.verticalPosition
-            let (lineEnded, frameEnded) = custom.stepBeam()
+            let (lineEnded, frameEnded) = custom.stepBeam(colorClocks: count)
             if lineEnded {
                 lines += 1
                 renderLine(line)
@@ -98,6 +112,24 @@ extension AmigaMemory {
             }
         }
         return (lines, frames)
+    }
+
+    /// Colour clocks from now, at most `limit` and all on the current line, in which the
+    /// Copper does nothing but count down: it is busy with the instruction it fetched, halted,
+    /// or waiting for a beam position that the rest of this line cannot reach.
+    private func copperIdleClocks(limit: Int) -> Int {
+        if copper.busy > 0 { return min(limit, copper.busy) }
+        switch copper.state {
+        case .halted:
+            return limit
+        case .fetching:
+            return 0
+        case .waiting(let position, let mask):
+            // Largest masked beam value any horizontal position of this line can give.
+            let vertical = (custom.verticalPosition & 0xFF) << 8 & mask
+            let horizontal = min(mask & 0xFE, CustomChips.colorClocksPerLine - 1)
+            return vertical | horizontal < position ? limit : 0
+        }
     }
 
     private mutating func stepCopper() {

@@ -242,9 +242,10 @@ public struct CustomChips: Equatable, Sendable {
         return (lines, frames)
     }
 
-    /// Moves the beam one colour clock; reports whether a line and a frame ended.
-    mutating func stepBeam() -> (lineEnded: Bool, frameEnded: Bool) {
-        horizontalPosition += 1
+    /// Moves the beam `colorClocks` along the current line (never past its end); reports
+    /// whether the line and the frame ended.
+    mutating func stepBeam(colorClocks: Int = 1) -> (lineEnded: Bool, frameEnded: Bool) {
+        horizontalPosition += colorClocks
         guard horizontalPosition >= Self.colorClocksPerLine else { return (false, false) }
         horizontalPosition = 0
         verticalPosition += 1
