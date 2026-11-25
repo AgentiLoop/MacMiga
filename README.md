@@ -841,6 +841,15 @@ and its "Unknown command" for the script's line, 1.3 having no built-in
 commands. With 512 KiB of chip RAM WHDLoad said the slave needs chip memory up
 to `$FF000`; the slave asks for 1 MiB of base memory.
 
+Saving: a program in that `data` directory (assembled with vasm, not in the
+repository) opened `SYS:saved` and wrote 18 bytes while Kickstart 1.3 ran
+under WHDLoad. Nothing reached the hard disk while the slave ran; after F10
+(the quit key, sent by the probe) WHDLoad returned to Kickstart 3.1's shell
+and wrote the file: the saved image holds `Workbench13/data/saved` (18 bytes,
+the program's text) in 6 newly written blocks. WHDLoad keeps what a game saves
+in memory until it quits, so quit with the game's quit key before closing
+MacMiga, or the saves are lost.
+
 ```sh
 swift run -c release MakeHardfile --name WHD \
     --startup "CD pacman_HD" --startup "SYS:WHDLoad/C/WHDLoad pacman.slave PRELOAD" \
