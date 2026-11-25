@@ -264,3 +264,41 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
         #expect(try copy.readLong(at: 0x7FFC) == stacked)
     }
 }
+
+@Test func cmpmComparesAndPostincrementsBothPointers() throws {
+    // CMPM.B (A0)+,(A1)+ as Kickstart's string compare uses it.
+    let (cpu, _) = try run([0xB308, 0xB308], steps: 2) { cpu, memory in
+        cpu[address: 0] = 0x300
+        cpu[address: 1] = 0x310
+        cpu.statusRegister = 0x2710
+        try memory.writeWord(0x4142, at: 0x300)
+        try memory.writeWord(0x4143, at: 0x310)
+    }
+    #expect(cpu[address: 0] == 0x302 && cpu[address: 1] == 0x312)
+    #expect(cpu.statusRegister == 0x2710) // $43 - $42: positive, nonzero, X kept
+    let (equal, _) = try run([0xB148]) { cpu, memory in // CMPM.W (A0)+,(A0)+
+        cpu[address: 0] = 0x300
+        cpu[address: 1] = 0x300
+        try memory.writeWord(0x1234, at: 0x300)
+        try memory.writeWord(0x1234, at: 0x302)
+    }
+    #expect(equal[address: 0] == 0x304) // same register: incremented twice
+    #expect(equal.statusRegister & 0x04 != 0)
+}
+
+@Test func addxSubxChainMultiPrecisionValues() throws {
+    // 64-bit add D1:D0 += D3:D2 then 64-bit subtract via -(A0),-(A1).
+    let (cpu, memory) = try run([0xD082, 0xD383, 0x9388], steps: 3) { cpu, memory in
+        cpu[data: 0] = 0xFFFF_FFFF; cpu[data: 1] = 1
+        cpu[data: 2] = 1; cpu[data: 3] = 2
+        cpu[address: 0] = 0x304; cpu[address: 1] = 0x314
+        try memory.writeLong(5, at: 0x300)
+        try memory.writeLong(3, at: 0x310)
+        cpu.statusRegister = 0x2704 // Z set so ADDX can keep it
+    }
+    #expect(cpu[data: 0] == 0 && cpu[data: 1] == 4) // carry propagated
+    var copy = memory
+    #expect(try copy.readLong(at: 0x310) == UInt32(bitPattern: -2)) // 3 - 5 - X(0)
+    #expect(cpu[address: 0] == 0x300 && cpu[address: 1] == 0x310)
+    #expect(cpu.statusRegister & 0x1D == 0x19) // X N C set, Z cleared
+}

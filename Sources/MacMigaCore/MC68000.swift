@@ -503,8 +503,8 @@ public struct MC68000: Equatable, Sendable {
         if mode == 3 { self[address: register] = address }
     }
 
-    /// OR ($8), EOR ($B, opmodes 4–6), AND ($C), MULU/MULS, DIVU/DIVS and EXG.
-    /// ABCD/SBCD and CMPM encodings are rejected.
+    /// OR ($8), EOR/CMPM ($B, opmodes 4–6), AND ($C), MULU/MULS, DIVU/DIVS and EXG.
+    /// ABCD/SBCD encodings are rejected.
     private mutating func logical(_ opcode: UInt16, memory: inout AmigaMemory) throws {
         let unsupported = CPUError.unsupportedInstruction(opcode: opcode, address: programCounter)
         let mode = Int((opcode >> 3) & 7), register = Int(opcode & 7)
@@ -563,6 +563,19 @@ public struct MC68000: Equatable, Sendable {
                     setLogicFlags(result & 0xFFFF, size: 2)
                 }
             }
+            programCounter = cursor
+            return
+        }
+
+        if group == 0xB && mode == 1 { // CMPM (Ay)+,(Ax)+: NZVC from (Ax) - (Ay), X unchanged
+            let size = [1, 2, 4][opmode & 3]
+            let sourceOperand = try moveOperand(mode: 3, register: register, size: size, cursor: &cursor, memory: &memory)
+            let source = try read(sourceOperand, size: size, memory: &memory)
+            let destinationOperand = try moveOperand(mode: 3, register: upper, size: size, cursor: &cursor, memory: &memory)
+            let destination = try read(destinationOperand, size: size, memory: &memory)
+            let extend = status & 0x10
+            _ = addSub(destination, source, size: size, subtract: true)
+            status = (status & ~0x10) | extend
             programCounter = cursor
             return
         }
@@ -695,7 +708,7 @@ public struct MC68000: Equatable, Sendable {
         programCounter = cursor
     }
 
-    /// ADD, ADDA, ADDQ, SUB, SUBA and SUBQ. ADDX/SUBX encodings are rejected.
+    /// ADD, ADDA, ADDQ, SUB, SUBA, SUBQ, ADDX and SUBX.
     private mutating func arithmetic(_ opcode: UInt16, memory: inout AmigaMemory) throws {
         let mode = Int((opcode >> 3) & 7)
         let register = Int(opcode & 7)
@@ -706,6 +719,26 @@ public struct MC68000: Equatable, Sendable {
         let addressForm = !quick && opmode & 3 == 3 // ADDA / SUBA
         let size = addressForm ? (opmode == 3 ? 2 : 4) : [1, 2, 4][opmode & 3]
         let toEffectiveAddress = quick || (!addressForm && opmode >= 4)
+        if !quick && !addressForm && opmode >= 4 && mode <= 1 {
+            // ADDX/SUBX Dy,Dx or -(Ay),-(Ax): source register is the low field.
+            var cursor = programCounter &+ 2
+            let source: UInt32, destination: UInt32
+            let target: MoveOperand
+            if mode == 0 {
+                source = self[data: register]
+                target = .data(upper)
+                destination = self[data: upper]
+            } else {
+                let sourceOperand = try moveOperand(mode: 4, register: register, size: size, cursor: &cursor, memory: &memory)
+                source = try read(sourceOperand, size: size, memory: &memory)
+                target = try moveOperand(mode: 4, register: upper, size: size, cursor: &cursor, memory: &memory)
+                destination = try read(target, size: size, memory: &memory)
+            }
+            let result = addSub(destination, source, size: size, subtract: subtract, extend: true)
+            try write(result, to: target, size: size, memory: &memory)
+            programCounter = cursor
+            return
+        }
         let legal: Bool
         if toEffectiveAddress {
             let alterable = mode <= 6 || (mode == 7 && register <= 1)

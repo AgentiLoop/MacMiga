@@ -182,8 +182,8 @@ private func referenceFlags(_ destination: UInt32, _ source: UInt32, size: Int, 
 @Test func arithmeticInvalidEncodingsFailBeforeSideEffects() throws {
     let invalid: [UInt16] = [
         0xD008, // ADD.B A0,D0
-        0xD100, // ADDX.B D0,D0
-        0x9108, // SUBX.B -(A0),-(A0)
+        0xD13C, // ADD.B D0,#imm
+        0x917C, // SUB.W D0,#imm
         0xD17C, // ADD.W D0,#imm
         0xD17A, // ADD.W D0,(d16,PC)
         0x907D, // SUB.W mode 7/5

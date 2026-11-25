@@ -174,7 +174,7 @@ private func compareFlags(_ destination: UInt32, _ source: UInt32, bits: Int) ->
         0x0C48, // CMPI.W #,A0
         0x0C7A, // CMPI.W #,(d16,PC) is not data alterable on the 68000
         0x0C7C, // CMPI.W #,#
-        0xB148  // CMPM.W (A0)+,(A0)+ is not implemented yet
+        0xB17C  // EOR.W D0,#imm
     ]
     for opcode in invalid {
         var memory = try compareMemory([opcode], at: 0x1FFFFE)
