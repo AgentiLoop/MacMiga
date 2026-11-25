@@ -78,7 +78,8 @@ final class Emulator {
         saveHardDisk()
         if let url {
             let writable = FileManager.default.isWritableFile(atPath: url.path)
-            hardDisk = try HardDisk(image: Array(try Data(contentsOf: url)), writeProtected: !writable)
+            // Mapped, so that a large image is only held once in memory, as the array.
+            hardDisk = try HardDisk(image: Array(try Data(contentsOf: url, options: .alwaysMapped)), writeProtected: !writable)
         } else {
             hardDisk = nil
         }

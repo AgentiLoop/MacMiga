@@ -639,3 +639,46 @@ private func addBadBlocks(_ lists: [[(Int, Int)]], to image: inout [UInt8], from
     #expect(try HardDisk(image: damaged).badBlocks == [100: 600, 101: 601])
     #expect(try HardDisk(image: rigidDisk(twoPartitions)).badBlocks.isEmpty)
 }
+
+@Test func largeDiskCommandsAndTheDeviceQuery() throws {
+    let disk = try HardDisk(image: rigidDisk(twoPartitions))
+    var machine = try boardMachine(disk)
+    func request(command: UInt16, high: UInt32 = 0, offset: UInt32 = 0, length: UInt32 = 512) throws -> (error: UInt8, actual: UInt32) {
+        try machine.memory.writeWord(command, at: 0x1000 + 28)
+        try machine.memory.writeByte(1, at: 0x1000 + 30)
+        try machine.memory.writeLong(high, at: 0x1000 + 32)   // io_Actual: offset bits 32-63
+        try machine.memory.writeLong(length, at: 0x1000 + 36)
+        try machine.memory.writeLong(0x2000, at: 0x1000 + 40)
+        try machine.memory.writeLong(offset, at: 0x1000 + 44)
+        try machine.memory.writeLong(0x1000, at: 0xE9_8000)
+        return (try machine.memory.readByte(at: 0x1000 + 31), try machine.memory.readLong(at: 0x1000 + 32))
+    }
+    // TD64 and NSD reads with the upper half 0 read the same block as CMD_READ.
+    for command: UInt16 in [24, 0xC000] {
+        try machine.memory.writeLong(0, at: 0x2000)
+        #expect(try request(command: command, offset: 100 * 512) == (0, 512))
+        #expect(try machine.memory.readByte(at: 0x2003) == dataByte(100 * 512 + 3))
+        // Beyond 4 GiB lies past the end of this disk.
+        #expect(try request(command: command, high: 1, offset: 100 * 512) == (0xFC, 0))
+    }
+    // Writes and formats land at the offset; seeks do nothing.
+    for (index, command) in [UInt16(25), 27, 0xC001, 0xC003].enumerated() {
+        try machine.memory.writeLong(0xA5A5_0000 | UInt32(index), at: 0x2000)
+        #expect(try request(command: command, offset: UInt32(200 + index) * 512) == (0, 512))
+        #expect(Array(disk.bytes[(200 + index) * 512..<(200 + index) * 512 + 4]) == [0xA5, 0xA5, 0, UInt8(index)])
+    }
+    #expect(disk.takeModifiedBlocks() == [200, 201, 202, 203])
+    #expect(try request(command: 26, offset: 512) == (0, 0))
+    #expect(try request(command: 0xC002, offset: 512) == (0, 0))
+
+    // NSCMD_DEVICEQUERY: format 0, 16 bytes, a trackdisk-like device, and its commands.
+    #expect(try request(command: 0x4000, length: 8) == (0xFC, 0))
+    #expect(try request(command: 0x4000, length: 16) == (0, 16))
+    let result = try longs(&machine.memory, at: 0x2000, count: 4)
+    #expect(Array(result.prefix(3)) == [0, 16, 5 << 16])
+    var commands: [UInt16] = []
+    var address = result[3]
+    while case let command = try machine.memory.readWord(at: address), command != 0 { commands.append(command); address += 2 }
+    #expect(commands.contains(2) && commands.contains(24) && commands.contains(0x4000) && commands.contains(0xC001))
+    #expect(commands.count == 28)
+}

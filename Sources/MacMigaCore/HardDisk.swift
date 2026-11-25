@@ -605,6 +605,11 @@ public struct HardDiskController: Equatable, Sendable {
         a.label("idString"); a.string(deviceName + " 1.0 (25.11.2026)\r\n")
         a.label("expansionLibrary"); a.string("expansion.library")
         a.label("dosLibrary"); a.string("dos.library")
+        // NSCMD_DEVICEQUERY's list of the commands the device carries out, 0-terminated.
+        a.label("supportedCommands")
+        for command in Array(1...15) + [19, 20, 21, 22, 24, 25, 26, 27, 0x4000, 0xC000, 0xC001, 0xC002, 0xC003, 0] {
+            a.word(UInt16(command))
+        }
         for (index, partition) in disk.partitions.enumerated() {
             a.label("dosName\(index)"); a.string(partition.name)
             // MakeDosNode parameter packet: names, unit, flags, then the DosEnvec.
@@ -685,10 +690,16 @@ extension AmigaMemory {
             let command = try readWord(at: request &+ 28)
             let length = try readLong(at: request &+ 36)
             let data = try readLong(at: request &+ 40)
-            let offset = try readLong(at: request &+ 44)
-            let inRange = UInt64(offset) + UInt64(length) <= UInt64(disk.capacity)
-            switch command {
-            case 2: // CMD_READ
+            // TD64 (24-27) and NSD (\$C000-\$C003) commands take the offset's upper 32 bits
+            // from io_Actual, for disks over 4 GiB; otherwise they are the 32-bit ones.
+            let isLarge = (24...27).contains(command) || (0xC000...0xC003).contains(command)
+            let high = isLarge ? UInt64(try readLong(at: request &+ 32)) : 0
+            let offset = high << 32 | UInt64(try readLong(at: request &+ 44))
+            let inRange = offset + UInt64(length) <= UInt64(disk.capacity)
+            // Read, write, seek, format: run as CMD_READ, CMD_WRITE, TD_SEEK, TD_FORMAT.
+            let basic = isLarge ? [2, 3, 10, 11][Int(command >= 0xC000 ? command - 0xC000 : command - 24)] : command
+            switch basic {
+            case 2: // CMD_READ, TD_READ64, NSCMD_TD_READ64
                 guard inRange else { status = -4; break } // IOERR_BADLENGTH
                 var address = data
                 for byte in disk.read(at: Int(offset), count: Int(length)) {
@@ -696,7 +707,7 @@ extension AmigaMemory {
                     address &+= 1
                 }
                 actual = length
-            case 3, 11: // CMD_WRITE, TD_FORMAT
+            case 3, 11: // CMD_WRITE, TD_FORMAT and their 64-bit forms
                 guard inRange else { status = -4; break }
                 guard !disk.isWriteProtected else { status = 28; break } // TDERR_WriteProt
                 var bytes = [UInt8]()
@@ -705,9 +716,17 @@ extension AmigaMemory {
                 disk.write(bytes, at: Int(offset))
                 actual = length
             case 1, 4, 5, 6, 7, 8, 9, 10, 12, 13, 14, 21:
-                // CMD_RESET/UPDATE/CLEAR/STOP/START/FLUSH, TD_MOTOR/SEEK/REMOVE/CHANGENUM,
-                // TD_CHANGESTATE (0 = disk present), TD_REMCHANGEINT: nothing to do.
+                // CMD_RESET/UPDATE/CLEAR/STOP/START/FLUSH, TD_MOTOR/SEEK (and the 64-bit
+                // seeks)/REMOVE/CHANGENUM, TD_CHANGESTATE (0 = disk present), TD_REMCHANGEINT:
+                // nothing to do.
                 break
+            case 0x4000: // NSCMD_DEVICEQUERY: format 0, size, NSDEVTYPE_TRACKDISK, the command list
+                guard length >= 16 else { status = -4; break }
+                try writeLong(0, at: data)
+                try writeLong(16, at: data &+ 4)
+                try writeLong(5 << 16, at: data &+ 8)
+                try writeLong(hardDiskController.address(of: "supportedCommands") ?? 0, at: data &+ 12)
+                actual = 16
             case 15: // TD_PROTSTATUS
                 actual = disk.isWriteProtected ? 1 : 0
             case 19: // TD_GETNUMTRACKS

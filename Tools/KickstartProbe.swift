@@ -56,7 +56,7 @@ struct KickstartProbe {
             let bytes = try Data(contentsOf: URL(fileURLWithPath: path))
             // As in the app, an image file that cannot be written is a write-protected disk.
             let hardDisk = try hardDiskPath.map {
-                try HardDisk(image: Array(try Data(contentsOf: URL(fileURLWithPath: $0))),
+                try HardDisk(image: Array(try Data(contentsOf: URL(fileURLWithPath: $0), options: .alwaysMapped)),
                              writeProtected: !FileManager.default.isWritableFile(atPath: $0))
             }
             let extendedROM = try extendedROMPath.map { Array(try Data(contentsOf: URL(fileURLWithPath: $0))) } ?? []

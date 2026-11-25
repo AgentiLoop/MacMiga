@@ -574,6 +574,16 @@ it writes itself. Images partitioned on an Amiga were tried afterwards (below).
 | Kickstart 1.3 | the same, `DH1` at priority 3 | booted from `DH1` |
 | Kickstart 3.1, 8 MiB fast RAM | HstWB Installer's image template `2gb_hdf_rdb_dh0-100mb-dos7_dh1-1.7gb-dos7` (partitioned with HDToolBox, 16 heads × 63 sectors, 1,900,000,000 bytes) | the table's FastFileSystem 45.16 was loaded for the two `DOS\7` partitions, which Kickstart's own FFS cannot read; both volumes, "Workbench" and "Work", were mounted and Kickstart booted from `DH0` to the shell prompt (the volumes are empty) |
 | Kickstart 3.1, 8 MiB fast RAM | the template `4gb_hdf_rdb_dh0-100mb-pds3_dh1-3.4gb-pds3` (3,800,000,000 bytes) | pfs3aio 19.2 from the table handled both `PDS\3` partitions; both volumes mounted, the second ending 3.8 GB into the image |
+| Kickstart 3.1, 8 MiB fast RAM | the template `8gb_hdf_rdb_dh0-100mb-pds3_dh1-6.9gb-pds3` (7,600,000,000 bytes) | both volumes mounted; the second ends 7.6 GB into the image, and before the device had the 64-bit commands (below) only the first was mounted |
+
+Disks over 4 GiB: io_Offset has only 32 bits, so the device also carries out
+the 64-bit commands file systems use for such disks, TD64 (`TD_READ64`,
+`TD_WRITE64`, `TD_SEEK64`, `TD_FORMAT64`, commands 24–27) and NSD
+(`NSCMD_TD_READ64` … `NSCMD_TD_FORMAT64`, `$C000`–`$C003`), with the offset's
+upper half in io_Actual, and answers `NSCMD_DEVICEQUERY` (`$4000`) with a
+trackdisk-like device type and the list of its commands. Hard disk images are
+read from a mapped file, so a large one is held in memory once (the probe used
+3.9 GB for the 7.6 GB image).
 
 These images are not a whole number of blocks long (1,900,000,000 bytes is
 3,710,937½ blocks), which `HardDisk` used to reject; the part block at the end
@@ -1060,7 +1070,9 @@ byte for byte, flags and priorities, empty partitions, a table longer than two
 cylinders, file systems read back as the same load files, and rejected names,
 sizes, types and programs; and bad-block lists: two chained `BADB` blocks,
 reads and writes across bad blocks (whole and partial), the blocks reported
-as modified, and a damaged list. For file systems in a partition table they
+as modified, and a damaged list; and the 64-bit commands (reads, writes,
+formats and seeks with either command set, an offset past 4 GiB rejected) and
+the device query with its command list. For file systems in a partition table they
 cover the load-file reader (three hunks with long and short relocations, BSS
 and a chip-memory request, laid out as a segment list; six kinds of bad file),
 reading the headers and their `LSEG` chains including damaged ones, and the
