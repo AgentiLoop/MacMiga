@@ -302,6 +302,18 @@ final class DisplayView: NSView {
         return layer
     }
 
+    /// The whole frame is every beam line (0–311, vertical blank included) and lowres
+    /// positions $58–$1C8. The standard display window ($2C81–$2CC1, 320×256) is not in its
+    /// middle, so the borders are uneven. The cropped area is centred on that window: lowres
+    /// $7A–$1C8 (the frame's right edge, where the beam ends) and lines 32–311.
+    static let fullArea = CGRect(x: 0, y: 0, width: Video.width, height: Video.height)
+    static let croppedArea = CGRect(x: (0x7A - Video.firstLowresColumn) * 2, y: 32,
+                                    width: Video.width - (0x7A - Video.firstLowresColumn) * 2, height: Video.height - 32)
+    /// Part of the frame shown, in frame pixels (hires columns × beam lines).
+    var visibleArea = DisplayView.fullArea {
+        didSet { shownPixels = Data() } // redraw the next frame even if it is unchanged
+    }
+
     /// Shows the frame unless it is the one already on screen, which costs no redraw at all.
     func show(_ video: Video) {
         let unchanged = video.pixels.withUnsafeBytes { new in
@@ -314,12 +326,13 @@ final class DisplayView: NSView {
         guard let provider = CGDataProvider(data: shownPixels as CFData) else { return }
         // In the window's own colour space Core Animation takes the pixels as they are; any
         // other space makes it convert every frame on the CPU.
-        layer?.contents = CGImage(width: Video.width, height: Video.height, bitsPerComponent: 8, bitsPerPixel: 32,
-                                  bytesPerRow: Video.width * 4,
-                                  space: window?.colorSpace?.cgColorSpace ?? CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
-                                                           | CGBitmapInfo.byteOrder32Little.rawValue),
-                                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        let frame = CGImage(width: Video.width, height: Video.height, bitsPerComponent: 8, bitsPerPixel: 32,
+                        bytesPerRow: Video.width * 4,
+                        space: window?.colorSpace?.cgColorSpace ?? CGColorSpaceCreateDeviceRGB(),
+                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
+                                                 | CGBitmapInfo.byteOrder32Little.rawValue),
+                        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        layer?.contents = visibleArea == DisplayView.fullArea ? frame : frame?.cropping(to: visibleArea)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -380,11 +393,11 @@ final class DisplayView: NSView {
     }
 
     /// One mouse count moves the Amiga pointer one lowres pixel, which is two display pixels
-    /// of the 736-pixel-wide view, so scale by the view size to keep pointer speed 1:1.
+    /// of the visible frame, so scale by the view size to keep pointer speed 1:1.
     private func moveMouse(_ event: NSEvent) {
         guard mouseCaptured else { return }
-        remainder.x += Double(event.deltaX) * Double(Video.width) / (2 * bounds.width)
-        remainder.y += Double(event.deltaY) * Double(Video.height) / bounds.height
+        remainder.x += Double(event.deltaX) * Double(visibleArea.width) / (2 * bounds.width)
+        remainder.y += Double(event.deltaY) * Double(visibleArea.height) / bounds.height
         let dx = Int(remainder.x.rounded(.towardZero)), dy = Int(remainder.y.rounded(.towardZero))
         guard dx != 0 || dy != 0 else { return }
         remainder.x -= Double(dx); remainder.y -= Double(dy)
@@ -419,6 +432,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.wantsLayer = true
         window.contentView = view
         window.contentAspectRatio = view.frame.size
+        if UserDefaults.standard.bool(forKey: "CropBorders") { showArea(cropped: true) }
         window.center()
         view.emulator = emulator
         emulator.onError = { [weak self] message in self?.alert(message) }
@@ -633,6 +647,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sender.state = emulator.bigChipRAM ? .on : .off
         view.updateJoystick()
     }
+    @objc func toggleCropBorders(_ sender: NSMenuItem) {
+        let cropped = sender.state != .on
+        UserDefaults.standard.set(cropped, forKey: "CropBorders")
+        sender.state = cropped ? .on : .off
+        showArea(cropped: cropped)
+    }
+
+    /// Shows the whole frame or the cropped area, keeping the window's height and its
+    /// pixel aspect (each beam line two points high, each hires pixel one point wide).
+    private func showArea(cropped: Bool) {
+        let area = cropped ? DisplayView.croppedArea : DisplayView.fullArea
+        view.visibleArea = area
+        let aspect = NSSize(width: area.width, height: area.height * 2)
+        let height = window.contentLayoutRect.height
+        window.contentAspectRatio = aspect
+        var frame = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: height * aspect.width / aspect.height,
+                                                             height: height))
+        frame.origin = NSPoint(x: window.frame.midX - frame.width / 2, y: window.frame.maxY - frame.height)
+        window.setFrame(frame, display: true)
+    }
+
     @objc func resetMachine() {
         do { try emulator.reset() } catch { alert("Reset failed: \(error)") }
         view.updateJoystick()
@@ -678,6 +713,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         machine.items.forEach { $0.target = self }
         machineItem.submenu = machine
         main.addItem(machineItem)
+        let viewItem = NSMenuItem()
+        viewItem.submenu = NSMenu(title: "View")
+        let crop = viewItem.submenu!.addItem(withTitle: "Crop Borders", action: #selector(toggleCropBorders(_:)), keyEquivalent: "b")
+        crop.target = self
+        crop.state = UserDefaults.standard.bool(forKey: "CropBorders") ? .on : .off
+        main.addItem(viewItem)
         NSApp.mainMenu = main
     }
 }
