@@ -443,7 +443,7 @@ public struct MC68000: Equatable, Sendable {
                 setLogicFlags(result, size: size)
             default: // 0 NEGX, 2 NEG
                 let value = try read(target, size: size, memory: &memory)
-                let result = addSub(0, value, size: size, subtract: true, extend: opcode & 0x0200 == 0)
+                let result = addSub(0, value, size: size, subtract: true, extend: (opcode >> 9) & 7 == 0)
                 try write(result, to: target, size: size, memory: &memory)
             }
         default:
