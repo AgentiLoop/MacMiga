@@ -176,11 +176,12 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
     }
 }
 
-@Test func chkClearsZVCAndLeavesNAloneWithoutATrap() throws {
-    // CHK D0,D2 and CHK D6,D4 within bounds (SingleStepTests 68000 set).
+@Test func chkClearsNZVCWithoutATrap() throws {
+    // CHK D7,D5 and CHK D0,D2 within bounds (SingleStepTests m68000 set). N follows the sign
+    // of the register, so it is clear whenever CHK does not trap.
     for (opcode, bound, value, status, statusAfter) in [
-        (UInt16(0x4580), UInt32(0x0B08_1E7C), UInt32(0x8D4A_0892), UInt16(0x271F), UInt16(0x2718)),
-        (0x4986, 0xDC0E_4C83, 0xF130_41DC, 0x2717, 0x2710)
+        (UInt16(0x4B87), UInt32(0x36C6_5C8A), UInt32(0x8A75_0B62), UInt16(0x2008), UInt16(0x2000)),
+        (0x4580, 0x37B4_5B3D, 0x3A40_0A31, 0xA51E, 0xA510)
     ] {
         let (cpu, _) = try run([opcode]) { cpu, _ in
             cpu[data: Int(opcode & 7)] = bound
@@ -188,6 +189,24 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
             cpu.statusRegister = status
         }
         #expect(cpu.programCounter == 0x102)
+        #expect(cpu.statusRegister == statusAfter)
+    }
+}
+
+@Test func divisionOverflowSetsNAndVAndClearsZAndC() throws {
+    // DIVU D7,D0, DIVS D5,D3 and DIVS D3,D2 (SingleStepTests m68000 set): the register is
+    // unchanged, and N and Z, which are documented as undefined, come out as 1 and 0.
+    for (opcode, divisor, dividend, status, statusAfter) in [
+        (UInt16(0x80C7), UInt32(0x9961_565E), UInt32(0x74C0_9614), UInt16(0x2606), UInt16(0x260A)),
+        (0x87C5, 0x708B_EE80, 0x7C82_59CF, 0xA205, 0xA20A),
+        (0x85C3, 0xE261_9026, 0x993C_AF16, 0x2014, 0x201A)
+    ] {
+        let (cpu, _) = try run([opcode]) { cpu, _ in
+            cpu[data: Int(opcode & 7)] = divisor
+            cpu[data: Int((opcode >> 9) & 7)] = dividend
+            cpu.statusRegister = status
+        }
+        #expect(cpu[data: Int((opcode >> 9) & 7)] == dividend)
         #expect(cpu.statusRegister == statusAfter)
     }
 }

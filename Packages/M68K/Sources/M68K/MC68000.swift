@@ -5,9 +5,12 @@ public enum CPUError: Error, Equatable {
     case addressError(address: UInt32, isWrite: Bool)
 }
 
-/// Functional MC68000; no prefetch or cycle accounting. It knows nothing about the machine
-/// around it: every memory access goes through the `M68KBus` passed to each call, and the
-/// machine presents interrupts with `interrupt(level:memory:)`.
+/// Functional MC68000. It knows nothing about the machine around it: every memory access goes
+/// through the `M68KBus` passed to each call, and the machine presents interrupts with
+/// `interrupt(level:memory:)`. `step` returns the time each instruction takes in CPU clocks,
+/// from tables 8-1 to 8-14 of the MC68000 User's Manual (MC68000UM); where both
+/// SingleStepTests sets have another figure than the printed table, a comment says so. The
+/// bus cycles inside an instruction and the prefetch queue are not modelled.
 ///
 /// The members are `@inlinable` so that a client module compiles the generic code
 /// specialized for its own bus type.
@@ -53,6 +56,11 @@ public struct MC68000: Equatable, Sendable {
     /// under the running code (`RESET` followed by a one-word `JMP (An)`).
     @usableFromInline var prefetchedOpcode: UInt16?
     @usableFromInline var stopped = false
+    /// CPU clocks of the instruction in progress. `step` returns the sum and clears it, so
+    /// it is 0 whenever a caller can see the CPU and never takes part in a comparison.
+    @usableFromInline var clocks = 0
+    /// CPU clocks from accepting an interrupt to the first instruction of its handler.
+    public static let interruptClocks = 44
     /// When false (hardware behaviour), unassigned opcodes and invalid addressing modes take the
     /// illegal-instruction exception (vector 4, stacked PC = the opcode's address). When true,
     /// `step` throws `CPUError.unsupportedInstruction` instead, for decoder diagnostics.
@@ -107,14 +115,16 @@ public struct MC68000: Equatable, Sendable {
         programCounter = entry
     }
 
-    /// Executes one supported instruction. PC is the next instruction address on success.
+    /// Executes one supported instruction and returns the CPU clocks it took (0 while the
+    /// CPU is stopped). PC is the next instruction address on success.
     /// On failure CPU registers remain unchanged; earlier bus writes are not rolled back.
     /// Errors are host diagnostics, not hardware exception processing.
     /// Group 1/2 exceptions (TRAP, privilege violation, divide by zero, illegal, line A/F)
     /// are processed by pushing PC and SR on the supervisor stack and jumping through the
-    /// vector table. Bus/address errors and trace are not modelled yet; see `interrupt(level:memory:)`.
-    @inlinable public mutating func step<Bus: M68KBus>(memory: inout Bus) throws {
-        guard !isStopped else { return }
+    /// vector table. Bus errors and trace are not modelled; see `interrupt(level:memory:)`.
+    @discardableResult
+    @inlinable public mutating func step<Bus: M68KBus>(memory: inout Bus) throws -> Int {
+        guard !isStopped else { return 0 }
         let prefetched = prefetchedOpcode
         prefetchedOpcode = nil
         let instructionAddress = programCounter
@@ -126,20 +136,30 @@ public struct MC68000: Equatable, Sendable {
                 if programCounter & 1 != 0, instructionAddress & 1 == 0, !stopsOnAddressError {
                     let opcode = try prefetched ?? memory.readAlignedWord(at: instructionAddress)
                     try enterAddressError(accessAddress: programCounter, write: false, instruction: opcode, memory: &memory)
+                    clocks += 50
                 }
             } catch let trap as Trap {
                 if let registers = trap.registers { self = registers }
                 if let condition = trap.condition { status = (status & 0xFF00) | condition }
                 try enterException(vector: trap.vector, returnAddress: trap.returnAddress, memory: &memory)
+                // CHK 40, division by zero 38, the others (illegal, privilege, TRAP, TRAPV,
+                // line A and F) 34; `registers` brought the operand's time with them.
+                clocks += trap.vector == 6 ? 40 : trap.vector == 5 ? 38 : 34
             } catch CPUError.unsupportedInstruction(_, let address) where !stopsOnIllegalInstruction {
                 try enterException(vector: 4, returnAddress: address, memory: &memory)
+                clocks += 34
             } catch CPUError.addressError(let address, let isWrite) where !stopsOnAddressError {
                 try enterAddressError(accessAddress: address, write: isWrite, memory: &memory)
+                clocks += 50
             }
         } catch {
+            clocks = 0
             prefetchedOpcode = prefetched
             throw error
         }
+        let used = clocks
+        clocks = 0
+        return used
     }
 
     /// Group 0 frame (MC68000UM 6.3.9.1), from SSP upwards: special status word (R/W bit 4,
@@ -237,6 +257,33 @@ public struct MC68000: Equatable, Sendable {
         mode == 2 || mode == 5 || mode == 6 || (mode == 7 && register <= 3)
     }
 
+    /// Clocks to calculate an effective address and fetch its operand (MC68000UM table 8-1):
+    /// one bus cycle of 4 clocks per extension word and per operand word, plus 2 for the
+    /// decrement of `-(An)` and for the index of `d8(An,Xn)`. Register operands take none.
+    @inlinable static func operandClocks(_ mode: Int, _ register: Int, size: Int) -> Int {
+        let clocks: Int
+        switch mode {
+        case 0, 1: return 0
+        case 2, 3: clocks = 4
+        case 4: clocks = 6
+        case 5: clocks = 8
+        case 6: clocks = 10
+        default: clocks = register == 0 || register == 2 ? 8 : register == 1 ? 12 : register == 3 ? 10 : 4
+        }
+        return size == 4 ? clocks + 4 : clocks
+    }
+
+    /// Clocks of LEA for a control addressing mode (table 8-10); PEA takes 8 more, and MOVEM's
+    /// and JMP's times are derived in place.
+    @inlinable static func controlClocks(_ mode: Int, _ register: Int) -> Int {
+        switch mode {
+        case 2: return 4
+        case 5: return 8
+        case 6: return 12
+        default: return register == 1 || register == 3 ? 12 : 8
+        }
+    }
+
     /// N and Z from the result, V and C cleared, X unchanged.
     @inlinable mutating func setLogicFlags(_ value: UInt32, size: Int) {
         status &= 0xFFF0
@@ -294,7 +341,12 @@ public struct MC68000: Equatable, Sendable {
             if opcode & 0xF1C0 == 0x41C0 { // LEA
                 next[address: Int((opcode >> 9) & 7)] = target
                 next.programCounter = cursor
+                next.clocks += Self.controlClocks(mode, register)
             } else {
+                // JMP: (An) 8, d16 10, d8 14, xxx.W 10, xxx.L 12; JSR takes 8 more.
+                let jump = mode == 2 ? 8 : mode == 6 || (mode == 7 && register == 3) ? 14
+                    : mode == 7 && register == 1 ? 12 : 10
+                next.clocks += opcode & 0xFFC0 == 0x4E80 ? jump + 8 : jump
                 // JSR resolves the target before changing A7, and fetches from it before it
                 // pushes: nothing is pushed when the target is odd.
                 if opcode & 0xFFC0 == 0x4E80, target & 1 == 0 {
@@ -307,11 +359,13 @@ public struct MC68000: Equatable, Sendable {
             self = next
         case 0x4E71: // NOP
             programCounter = nextWord
+            clocks += 4
         case 0x4E75: // RTS
             let stackPointer = self[address: 7]
             let target = try memory.readAlignedLong(at: stackPointer)
             self[address: 7] = stackPointer &+ 4
             programCounter = target
+            clocks += 16
         case _ where opcode & 0xF100 == 0x7000: // MOVEQ #imm,Dn
             let register = Int((opcode >> 9) & 7)
             let immediate = Int32(Int8(bitPattern: UInt8(truncatingIfNeeded: opcode)))
@@ -320,6 +374,7 @@ public struct MC68000: Equatable, Sendable {
             if immediate < 0 { status |= 0x0008 }
             if immediate == 0 { status |= 0x0004 }
             programCounter = nextWord
+            clocks += 4
         case _ where opcode & 0xF000 == 0x6000: // BRA, BSR, Bcc
             let condition = Int((opcode >> 8) & 15)
             let shortDisplacement = UInt8(truncatingIfNeeded: opcode)
@@ -339,8 +394,13 @@ public struct MC68000: Equatable, Sendable {
                 try memory.writeAlignedLong(returnAddress, at: stackPointer)
                 self[address: 7] = stackPointer
                 programCounter = target
+                clocks += 18
+            } else if condition == 0 || conditionHolds(condition) {
+                programCounter = target
+                clocks += 10
             } else {
-                programCounter = condition == 0 || conditionHolds(condition) ? target : returnAddress
+                programCounter = returnAddress
+                clocks += shortDisplacement == 0 ? 12 : 8
             }
         case _ where opcode & 0xF000 == 0x5000 && opcode & 0x00C0 != 0x00C0, // ADDQ / SUBQ
              _ where opcode & 0xB000 == 0x9000: // SUB/SUBA ($9xxx), ADD/ADDA ($Dxxx)
@@ -351,12 +411,14 @@ public struct MC68000: Equatable, Sendable {
             let displacement = Self.signExtendWord(try memory.readAlignedWord(at: nextWord))
             if conditionHolds(Int((opcode >> 8) & 15)) {
                 programCounter = nextWord &+ 2
+                clocks += 12
             } else {
                 // Only the low word of Dn counts; the loop ends when it reaches -1.
                 let register = Int(opcode & 7)
                 let counter = UInt16(truncatingIfNeeded: dataRegisters[register]) &- 1
                 dataRegisters[register] = (dataRegisters[register] & 0xFFFF_0000) | UInt32(counter)
                 programCounter = counter == 0xFFFF ? nextWord &+ 2 : nextWord &+ displacement
+                clocks += counter == 0xFFFF ? 14 : 10
             }
         case _ where opcode & 0xF000 == 0xB000 && [0, 1, 2, 3, 7].contains((opcode >> 6) & 7),
              _ where opcode & 0xFF00 == 0x0C00 && opcode & 0x00C0 != 0x00C0: // CMP / CMPA / CMPI
@@ -379,8 +441,10 @@ public struct MC68000: Equatable, Sendable {
             var next = self
             var cursor = nextWord
             let target = try next.moveOperand(mode: mode, register: register, size: 1, cursor: &cursor, memory: &memory)
-            try next.write(conditionHolds(Int((opcode >> 8) & 15)) ? 0xFF : 0, to: target, size: 1, memory: &memory)
+            let holds = conditionHolds(Int((opcode >> 8) & 15))
+            try next.write(holds ? 0xFF : 0, to: target, size: 1, memory: &memory)
             next.programCounter = cursor
+            next.clocks += mode == 0 ? (holds ? 6 : 4) : 8 + Self.operandClocks(mode, register, size: 1)
             self = next
         case _ where opcode & 0xB1F0 == 0x8100: // SBCD ($8), ABCD ($C): Dy,Dx or -(Ay),-(Ax)
             var next = self
@@ -396,6 +460,7 @@ public struct MC68000: Equatable, Sendable {
             let result = next.decimal(destination, source, subtract: opcode & 0x4000 == 0)
             try next.write(result, to: target, size: size, memory: &memory)
             next.programCounter = cursor
+            next.clocks += memoryForm ? 18 : 6
             self = next
         case _ where opcode & 0xB000 == 0x8000, // OR/DIV ($8), AND/MUL/EXG ($C)
              _ where opcode & 0xF000 == 0xB000: // EOR (CMP opmodes matched above)
@@ -477,6 +542,7 @@ public struct MC68000: Equatable, Sendable {
                 self[data: data] = count == 4 ? value : (self[data: data] & 0xFFFF_0000) | value
             }
             programCounter = cursor
+            clocks += count == 4 ? 24 : 16
             return
         }
         if dynamic || opcode & 0x0F00 == 0x0800 {
@@ -498,6 +564,18 @@ public struct MC68000: Equatable, Sendable {
                 try write(result, to: target, size: size, memory: &memory)
             }
             programCounter = cursor
+            // BTST 6 on Dn, 4 + operand in memory (10 for an immediate operand in both test
+            // sets; table 8-8 gives 8). BCHG and BSET 8, BCLR 10 on Dn (2 less for a bit
+            // below 16), 8 + operand in memory. A bit number in an extension word adds 4.
+            let base: Int
+            if mode == 0 {
+                base = operation == 0 ? 6 : (operation == 2 ? 10 : 8) - (number % 32 < 16 ? 2 : 0)
+            } else if mode == 7 && register == 4 {
+                base = 10
+            } else {
+                base = (operation == 0 ? 4 : 8) + Self.operandClocks(mode, register, size: 1)
+            }
+            clocks += dynamic ? base : base + 4
             return
         }
 
@@ -517,6 +595,7 @@ public struct MC68000: Equatable, Sendable {
             default: statusRegister = status ^ operand
             }
             programCounter = cursor
+            clocks += 20
             return
         }
         guard Self.isDataAlterable(mode, register) else { throw unsupported }
@@ -535,6 +614,11 @@ public struct MC68000: Equatable, Sendable {
         }
         try write(result, to: target, size: size, memory: &memory)
         programCounter = cursor
+        if mode == 0 { // 16 for every long operation (table 8-5 prints 14 for ANDI.L)
+            clocks += size == 4 ? 16 : 8
+        } else {
+            clocks += (size == 4 ? 20 : 12) + Self.operandClocks(mode, register, size: size)
+        }
     }
 
     /// Group $4 instructions other than LEA/JMP/JSR/NOP/RTS (handled in `execute`).
@@ -553,10 +637,12 @@ public struct MC68000: Equatable, Sendable {
             guard supervisor else { throw privilege }
             prefetchedOpcode = try memory.readAlignedWord(at: cursor)
             memory.resetDevices()
+            clocks += 132
         case 0x4E72: // STOP #imm: load SR and wait for an interrupt.
             guard supervisor else { throw privilege }
             statusRegister = try extensionWord(cursor: &cursor, memory: &memory)
             stopped = true
+            clocks += 4
         case 0x4E73: // RTE
             guard supervisor else { throw privilege }
             let stackPointer = supervisorStackPointer
@@ -565,9 +651,11 @@ public struct MC68000: Equatable, Sendable {
             supervisorStackPointer = stackPointer &+ 6
             statusRegister = savedStatus
             programCounter = target
+            clocks += 20
             return
         case 0x4E76: // TRAPV
             if status & 0x02 != 0 { throw Trap(vector: 7, returnAddress: cursor) }
+            clocks += 4
         case 0x4E77: // RTR
             let stackPointer = self[address: 7]
             let condition = try memory.readAlignedWord(at: stackPointer)
@@ -575,20 +663,24 @@ public struct MC68000: Equatable, Sendable {
             self[address: 7] = stackPointer &+ 6
             status = (status & 0xFF00) | (condition & 0x1F)
             programCounter = target
+            clocks += 20
             return
         case 0x4840...0x4847: // SWAP
             let value = self[data: register]
             let swapped = value << 16 | value >> 16
             self[data: register] = swapped
             setLogicFlags(swapped, size: 4)
+            clocks += 4
         case 0x4880...0x4887: // EXT.W
             let value = UInt32(UInt16(bitPattern: Int16(Int8(bitPattern: UInt8(truncatingIfNeeded: self[data: register])))))
             self[data: register] = (self[data: register] & 0xFFFF_0000) | value
             setLogicFlags(value, size: 2)
+            clocks += 4
         case 0x48C0...0x48C7: // EXT.L
             let value = Self.signExtendWord(UInt16(truncatingIfNeeded: self[data: register]))
             self[data: register] = value
             setLogicFlags(value, size: 4)
+            clocks += 4
         case 0x4E40...0x4E4F: // TRAP #n
             throw Trap(vector: 32 + register + (opcode & 8 != 0 ? 8 : 0), returnAddress: cursor)
         case 0x4E50...0x4E57: // LINK An,#d16
@@ -598,15 +690,18 @@ public struct MC68000: Equatable, Sendable {
             self[address: 7] = stackPointer
             self[address: register] = stackPointer
             self[address: 7] = stackPointer &+ displacement
+            clocks += 16
         case 0x4E58...0x4E5F: // UNLK An
             let base = self[address: register]
             let value = try memory.readAlignedLong(at: base)
             self[address: 7] = base &+ 4
             self[address: register] = value
+            clocks += 12
         case 0x4E60...0x4E6F: // MOVE An,USP / MOVE USP,An
             guard supervisor else { throw privilege }
             if opcode & 8 == 0 { userStackPointer = self[address: register] }
             else { self[address: register] = userStackPointer }
+            clocks += 4
         case _ where opcode & 0xFFC0 == 0x4840: // PEA
             guard Self.isControl(mode, register) else { throw unsupported }
             guard case .memory(let address) = try moveOperand(
@@ -615,29 +710,37 @@ public struct MC68000: Equatable, Sendable {
             let stackPointer = self[address: 7] &- 4
             try memory.writeAlignedLong(address, at: stackPointer)
             self[address: 7] = stackPointer
+            clocks += Self.controlClocks(mode, register) + 8
         case _ where opcode & 0xFFC0 == 0x4800: // NBCD <ea>
             guard Self.isDataAlterable(mode, register) else { throw unsupported }
             let target = try moveOperand(mode: mode, register: register, size: 1, cursor: &cursor, memory: &memory)
             let value = try read(target, size: 1, memory: &memory)
             try write(decimal(0, value, subtract: true), to: target, size: 1, memory: &memory)
+            clocks += mode == 0 ? 6 : 8 + Self.operandClocks(mode, register, size: 1)
         case _ where opcode & 0xF1C0 == 0x4180: // CHK.W <ea>,Dn: trap 6 if Dn < 0 or Dn > bound
             guard Self.isDataAddressing(mode, register) else { throw unsupported }
             let source = try moveOperand(mode: mode, register: register, size: 2, cursor: &cursor, memory: &memory)
             let bound = Int16(bitPattern: UInt16(try read(source, size: 2, memory: &memory)))
             let value = Int16(bitPattern: UInt16(truncatingIfNeeded: self[data: Int((opcode >> 9) & 7)]))
-            // Z, V and C are documented as undefined and N as undefined without a trap. As in
-            // the SingleStepTests set, Z, V and C are cleared and N is left alone unless CHK traps.
-            status &= ~0x07
+            // Z, V and C are documented as undefined, and N as undefined without a trap. As
+            // the 68000's microcode leaves them: Z, V and C clear, N set for a negative register.
+            status = (status & ~0x0F) | (value < 0 ? 0x08 : 0)
+            clocks += Self.operandClocks(mode, register, size: 2)
             if value < 0 || value > bound {
-                status = value < 0 ? status | 0x08 : status & ~0x08
+                // The upper bound is tested first, as bound - register in 16 bits, and that
+                // trap is 2 clocks shorter; an overflow of the subtraction counts as above.
+                let difference = Int(bound) - Int(value)
+                if difference < 0 || difference > 0x7FFF { clocks -= 2 }
                 throw Trap(vector: 6, returnAddress: cursor, condition: status & 0xFF, registers: self)
             }
+            clocks += 10
         case _ where opcode & 0xFB80 == 0x4880: // MOVEM
             try moveMultiple(opcode, cursor: &cursor, memory: &memory)
         case _ where opcode & 0xFFC0 == 0x40C0: // MOVE SR,<ea> (unprivileged on the 68000)
             guard Self.isDataAlterable(mode, register) else { throw unsupported }
             let target = try moveOperand(mode: mode, register: register, size: 2, cursor: &cursor, memory: &memory)
             try write(UInt32(status), to: target, size: 2, memory: &memory)
+            clocks += mode == 0 ? 6 : 8 + Self.operandClocks(mode, register, size: 2)
         case _ where opcode & 0xFDC0 == 0x44C0: // MOVE <ea>,CCR / MOVE <ea>,SR
             guard Self.isDataAddressing(mode, register) else { throw unsupported }
             let toStatus = opcode & 0x0200 != 0
@@ -645,12 +748,15 @@ public struct MC68000: Equatable, Sendable {
             let source = try moveOperand(mode: mode, register: register, size: 2, cursor: &cursor, memory: &memory)
             let value = UInt16(try read(source, size: 2, memory: &memory))
             if toStatus { statusRegister = value } else { status = (status & 0xFF00) | (value & 0x1F) }
+            clocks += 12 + Self.operandClocks(mode, register, size: 2)
         case _ where opcode & 0xFFC0 == 0x4AC0: // TAS (Amiga chip-bus RMW quirks not modelled)
             guard Self.isDataAlterable(mode, register) else { throw unsupported }
             let target = try moveOperand(mode: mode, register: register, size: 1, cursor: &cursor, memory: &memory)
             let value = try read(target, size: 1, memory: &memory)
             setLogicFlags(value, size: 1)
             try write(value | 0x80, to: target, size: 1, memory: &memory)
+            // Both test sets have 10 + operand for memory; table 8-6 prints 14 + operand.
+            clocks += mode == 0 ? 4 : 10 + Self.operandClocks(mode, register, size: 1)
         case _ where (opcode & 0xF900 == 0x4000 || opcode & 0xFF00 == 0x4A00) && opcode & 0x00C0 != 0x00C0:
             // NEGX, CLR, NEG, NOT, TST
             guard Self.isDataAlterable(mode, register) else { throw unsupported }
@@ -670,6 +776,13 @@ public struct MC68000: Equatable, Sendable {
                 let value = try read(target, size: size, memory: &memory)
                 let result = addSub(0, value, size: size, subtract: true, extend: (opcode >> 9) & 7 == 0)
                 try write(result, to: target, size: size, memory: &memory)
+            }
+            if (opcode >> 9) & 7 == 5 { // TST only reads
+                clocks += 4 + Self.operandClocks(mode, register, size: size)
+            } else if mode == 0 {
+                clocks += size == 4 ? 6 : 4
+            } else {
+                clocks += (size == 4 ? 12 : 8) + Self.operandClocks(mode, register, size: size)
             }
         default:
             throw unsupported
@@ -691,6 +804,9 @@ public struct MC68000: Equatable, Sendable {
             throw CPUError.unsupportedInstruction(opcode: opcode, address: programCounter)
         }
         let list = try extensionWord(cursor: &cursor, memory: &memory)
+        // To registers 8 + the mode's time, to memory 4 + (-(An) as (An)); 4 clocks per word moved.
+        clocks += (toRegisters ? 8 : 4) + Self.operandClocks(mode == 4 ? 2 : mode, register, size: 2)
+            + list.nonzeroBitCount * Int(size) * 2
         if mode == 4 { // predecrement: bit 0 = A7 ... bit 15 = D0, stored downwards
             var address = self[address: register]
             for bit in 0..<16 where list & (1 << bit) != 0 {
@@ -750,6 +866,7 @@ public struct MC68000: Equatable, Sendable {
                 self[address: register] = value
             }
             programCounter = cursor
+            clocks += 6
             return
         }
 
@@ -765,9 +882,15 @@ public struct MC68000: Equatable, Sendable {
                     : UInt32(source) * (destination & 0xFFFF)
                 self[data: upper] = product
                 setLogicFlags(product, size: 4)
+                // 38 clocks and 2 for each 1 in the source (MULU), or for each change between
+                // neighbouring bits of the source with a 0 appended (MULS).
+                let pattern = signed ? source ^ (source << 1) : source
+                clocks += 38 + 2 * pattern.nonzeroBitCount + Self.operandClocks(mode, register, size: 2)
             } else {
+                clocks += Self.operandClocks(mode, register, size: 2)
                 // Division by zero: N, Z, V and C are clear in the stacked SR (SingleStepTests set).
                 guard source != 0 else { throw Trap(vector: 5, returnAddress: cursor, condition: status & 0x10, registers: self) }
+                clocks += Self.divisionClocks(destination, source, signed: signed)
                 let quotient: Int64, remainder: Int64
                 if signed {
                     let dividend = Int64(Int32(bitPattern: destination)), divisor = Int64(Int16(bitPattern: source))
@@ -779,8 +902,9 @@ public struct MC68000: Equatable, Sendable {
                 }
                 let overflow = signed ? quotient < -32768 || quotient > 32767 : quotient > 0xFFFF
                 if overflow {
-                    // Destination unchanged; V set, C cleared (N and Z left as they were).
-                    status = (status & 0xFFFC) | 0x02
+                    // Destination unchanged; V set, C clear. N and Z are documented as
+                    // undefined: the 68000's microcode leaves N set and Z clear.
+                    status = (status & 0xFFF0) | 0x0A
                 } else {
                     let result = UInt32(UInt16(truncatingIfNeeded: remainder)) << 16
                         | UInt32(UInt16(truncatingIfNeeded: quotient))
@@ -802,6 +926,7 @@ public struct MC68000: Equatable, Sendable {
             _ = addSub(destination, source, size: size, subtract: true)
             status = (status & ~0x10) | extend
             programCounter = cursor
+            clocks += size == 4 ? 20 : 12
             return
         }
 
@@ -818,6 +943,58 @@ public struct MC68000: Equatable, Sendable {
         try write(result, to: toEffectiveAddress ? operand : .data(upper), size: size, memory: &memory)
         setLogicFlags(result, size: size)
         programCounter = cursor
+        clocks += Self.operationClocks(mode, register, size: size, toMemory: toEffectiveAddress && mode != 0)
+    }
+
+    /// Clocks of ADD, SUB, AND, OR and EOR between a data register and an operand (table 8-4).
+    /// To a register: 4 + operand for bytes and words; 6 + operand for longs, 8 when the
+    /// operand is a register or immediate. To memory: 8 + operand, 12 + operand for longs.
+    @inlinable static func operationClocks(_ mode: Int, _ register: Int, size: Int, toMemory: Bool) -> Int {
+        let operand = operandClocks(mode, register, size: size)
+        if toMemory { return (size == 4 ? 12 : 8) + operand }
+        if size != 4 { return 4 + operand }
+        return mode <= 1 || (mode == 7 && register == 4) ? 8 + operand : 6 + operand
+    }
+
+    /// Clocks of DIVU or DIVS without the operand fetch, for a divisor that is not 0. The
+    /// 68000 divides bit by bit and the time depends on the operands; this follows Jorge
+    /// Cwik's description of the microcode and matches every division in the m68000 test
+    /// set. DIVU: 10 on overflow, else 76 to 136. DIVS: 16 or 18 on an overflow seen at
+    /// once, else 120 to 156.
+    @inlinable static func divisionClocks(_ dividend: UInt32, _ divisor: UInt16, signed: Bool) -> Int {
+        if !signed {
+            if dividend >> 16 >= UInt32(divisor) { return 10 }
+            var steps = 38
+            var remainder = dividend
+            let shifted = UInt32(divisor) << 16
+            for _ in 0..<15 {
+                let carry = remainder & 0x8000_0000 != 0
+                remainder <<= 1
+                if carry {
+                    remainder &-= shifted
+                } else {
+                    steps += 2
+                    if remainder >= shifted {
+                        remainder &-= shifted
+                        steps -= 1
+                    }
+                }
+            }
+            return steps * 2
+        }
+        let negativeDividend = dividend & 0x8000_0000 != 0, negativeDivisor = divisor & 0x8000 != 0
+        let magnitude = negativeDividend ? 0 &- dividend : dividend
+        let divisorMagnitude = UInt32(negativeDivisor ? 0 &- divisor : divisor)
+        var steps = negativeDividend ? 7 : 6
+        if magnitude >> 16 >= divisorMagnitude { return (steps + 2) * 2 }
+        steps += 55
+        if !negativeDivisor { steps += negativeDividend ? 1 : -1 }
+        var quotient = magnitude / divisorMagnitude
+        for _ in 0..<15 {
+            if quotient & 0x8000 == 0 { steps += 1 }
+            quotient <<= 1
+        }
+        return steps * 2
     }
 
     /// ASL/ASR, LSL/LSR, ROXL/ROXR, ROL/ROR on Dn (count 1–8 or Dn mod 64) and on memory words.
@@ -874,6 +1051,11 @@ public struct MC68000: Equatable, Sendable {
         if overflow { status |= 0x02 }
         if carry { status |= 0x01 }
         programCounter = cursor
+        if sizeBits == 3 {
+            clocks += 8 + Self.operandClocks(Int((opcode >> 3) & 7), Int(opcode & 7), size: 2)
+        } else {
+            clocks += (size == 4 ? 8 : 6) + 2 * count
+        }
     }
 
     @usableFromInline enum MoveOperand {
@@ -931,6 +1113,12 @@ public struct MC68000: Equatable, Sendable {
         if result == 0 { status |= 0x04 }
         if result & sign != 0 { status |= 0x08 }
         programCounter = cursor
+        let operand = Self.operandClocks(mode, register, size: size)
+        if immediateForm { // CMPI: Dn 8 (long 14), memory 8 (long 12) + operand
+            clocks += mode == 0 ? (size == 4 ? 14 : 8) : (size == 4 ? 12 : 8) + operand
+        } else { // CMP 4 + operand (long 6); CMPA 6 + operand
+            clocks += (bits == 32 ? 6 : 4) + operand
+        }
     }
 
     /// ADD, ADDA, ADDQ, SUB, SUBA, SUBQ, ADDX and SUBX.
@@ -962,6 +1150,7 @@ public struct MC68000: Equatable, Sendable {
             let result = addSub(destination, source, size: size, subtract: subtract, extend: true)
             try write(result, to: target, size: size, memory: &memory)
             programCounter = cursor
+            clocks += mode == 0 ? (size == 4 ? 8 : 4) : (size == 4 ? 30 : 18)
             return
         }
         let legal: Bool
@@ -997,6 +1186,13 @@ public struct MC68000: Equatable, Sendable {
             let operand = addressForm && size == 2 ? Self.signExtendWord(UInt16(source)) : source
             self[address: index] = subtract ? self[address: index] &- operand : self[address: index] &+ operand
             programCounter = cursor
+            if quick { // ADDQ/SUBQ to An: 8 for both sizes (table 8-5 prints 4 for ADDQ.W)
+                clocks += 8
+            } else if size == 2 { // ADDA.W/SUBA.W
+                clocks += 8 + Self.operandClocks(mode, register, size: 2)
+            } else {
+                clocks += Self.operationClocks(mode, register, size: 4, toMemory: false)
+            }
             return
         }
 
@@ -1014,6 +1210,11 @@ public struct MC68000: Equatable, Sendable {
         if result == 0 { status |= 0x04 }
         if overflow { status |= 0x02 }
         programCounter = cursor
+        if quick { // ADDQ/SUBQ: Dn 4 (long 8), memory 8 (long 12) + operand
+            clocks += mode == 0 ? (size == 4 ? 8 : 4) : (size == 4 ? 12 : 8) + Self.operandClocks(mode, register, size: size)
+        } else {
+            clocks += Self.operationClocks(mode, register, size: size, toMemory: toEffectiveAddress)
+        }
     }
 
     @inlinable func read<Bus: M68KBus>(_ operand: MoveOperand, size: Int, memory: inout Bus) throws -> UInt32 {
@@ -1099,6 +1300,9 @@ public struct MC68000: Equatable, Sendable {
             if value & (UInt32(1) << (size * 8 - 1)) != 0 { status |= 8 }
         }
         programCounter = cursor
+        // 4 + source + destination (table 8-2 and 8-3); a `-(An)` destination has no extra 2.
+        clocks += 4 + Self.operandClocks(sourceMode, sourceRegister, size: size)
+            + Self.operandClocks(destinationMode == 4 ? 2 : destinationMode, destinationRegister, size: size)
     }
 
     @inlinable static func signExtendWord(_ word: UInt16) -> UInt32 {

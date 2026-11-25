@@ -60,6 +60,28 @@ private func store(_ words: [UInt16], at address: UInt32, in memory: inout Amiga
     #expect(machine.clock >= frame && machine.clock < frame + 100)
 }
 
+@Test func theClockAdvancesByEachInstructionsTimeAndAnInterruptTakesFortyFourClocks() throws {
+    var machine = try machine()
+    try machine.memory.writeLong(0x400, at: 0x64) // level 1 autovector
+    try store([0x4E71], at: 0x400, in: &machine.memory)
+    // NOP; MOVE.L $2000.L,$2004.L; MOVE.W #$8004,$DFF09C (request the software interrupt)
+    try store([0x4E71, 0x23F9, 0x0000, 0x2000, 0x0000, 0x2004, 0x33FC, 0x8004, 0x00DF, 0xF09C],
+              at: 0x200, in: &machine.memory)
+    try machine.memory.writeWord(0xC004, at: 0xDFF09A) // INTEN | SOFT
+    machine.cpu.programCounter = 0x200
+    machine.cpu.statusRegister = 0x2000
+    let start = machine.clock
+    try machine.step()
+    #expect(machine.clock - start == 4)
+    try machine.step()
+    #expect(machine.clock - start == 4 + 36)
+    try machine.step()
+    #expect(machine.clock - start == 4 + 36 + 20)
+    try machine.step() // the interrupt is accepted, then the handler's NOP runs
+    #expect(machine.cpu.programCounter == 0x402)
+    #expect(machine.clock - start == 4 + 36 + 20 + 44 + 4)
+}
+
 @Test func stopIsPrivileged() throws {
     var machine = try machine()
     try machine.memory.writeLong(0x600, at: 0x20)

@@ -6,7 +6,9 @@ public typealias CPUError = M68K.CPUError
 
 /// An A500 (PAL) assembled from the CPU and the memory bus, stepped one instruction at a time.
 ///
-/// Each instruction is charged a fixed estimate of CPU clocks (no cycle-accurate timing yet).
+/// Each instruction takes the CPU clocks the 68000 core reports for it, and an accepted
+/// interrupt 44 more. The chipset is advanced once per instruction, not per bus cycle, and
+/// takes no bus time from the CPU.
 /// That time advances the beam (colour clock = 2 CPU clocks) and both CIA timers (E clock =
 /// 10 CPU clocks). CIA-A's TOD counts frames (VSYNC) and CIA-B's counts lines (HSYNC).
 /// CIA-A /IRQ sets INTREQ PORTS (bit 3, level 2) and CIA-B /IRQ sets INTREQ EXTER
@@ -14,8 +16,7 @@ public typealias CPUError = M68K.CPUError
 public struct AmigaMachine {
     /// PAL 68000 clock in Hz.
     public static let cpuClock = 7_093_790
-    /// Estimated CPU clocks per executed instruction, and per idle step while stopped.
-    public static let clocksPerInstruction = 10
+    /// CPU clocks per idle step while the CPU is stopped.
     public static let clocksPerStoppedStep = 4
 
     public var cpu = MC68000()
@@ -39,13 +40,17 @@ public struct AmigaMachine {
     }
 
     /// Takes a pending interrupt if the CPU accepts it, then executes one instruction
-    /// (or idles while stopped) and advances the chipset by the estimated time.
+    /// (or idles while stopped) and advances the chipset by the time that took.
     public mutating func step() throws {
         let level = memory.custom.interruptLevel
-        if level > 0 { try cpu.interrupt(level: level, memory: &memory) }
-        let stopped = cpu.isStopped
-        try cpu.step(memory: &memory)
-        advance(cpuClocks: stopped ? Self.clocksPerStoppedStep : Self.clocksPerInstruction)
+        var clocks = 0
+        if level > 0, try cpu.interrupt(level: level, memory: &memory) { clocks = MC68000.interruptClocks }
+        if cpu.isStopped {
+            clocks = Self.clocksPerStoppedStep
+        } else {
+            clocks += try cpu.step(memory: &memory)
+        }
+        advance(cpuClocks: clocks)
     }
 
     /// Queues an Amiga raw key code (e.g. `$45` Esc, `$40` Space) press or release.
