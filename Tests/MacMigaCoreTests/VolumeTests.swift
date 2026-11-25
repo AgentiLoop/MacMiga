@@ -450,3 +450,47 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
                                         "readme": text]
     #expect(reader.tree(reader.root) == expected)
 }
+
+@Test func sourcesCanLeaveOutPathsAndNamesAVolumeCannotHold() throws {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("MacMigaTests-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: base) }
+    let folder = base.appendingPathComponent("CD")
+    let long = String(repeating: "n", count: 31)
+    for directory in ["Developer/include", "Fonts", long] {
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent(directory), withIntermediateDirectories: true)
+    }
+    try Data([1]).write(to: folder.appendingPathComponent("Developer/include/big.h"))
+    try Data([2]).write(to: folder.appendingPathComponent("Fonts/short.font"))
+    try Data([3]).write(to: folder.appendingPathComponent("Fonts/\(long)"))
+    try Data([4]).write(to: folder.appendingPathComponent("\(long)/inside"))
+    try Data([5]).write(to: folder.appendingPathComponent("Developer.info"))
+
+    #expect(FastFileSystem.canStore(name: String(repeating: "n", count: 30)))
+    #expect(!FastFileSystem.canStore(name: long))
+    #expect(!FastFileSystem.canStore(name: "a:b") && !FastFileSystem.canStore(name: "a/b") && !FastFileSystem.canStore(name: ""))
+    #expect(!FastFileSystem.canStore(name: "日本"))
+
+    // As it is, the folder cannot become a volume.
+    #expect(throws: VolumeError.self) { try FastFileSystem.hardfile(from: [folder], freeBytes: 0) }
+    var asked: [String] = []
+    let include: ([String]) -> Bool = { path in
+        asked.append(path.joined(separator: "/"))
+        return path.map { $0.lowercased() } != ["developer"] && FastFileSystem.canStore(name: path[path.count - 1])
+    }
+    let entries = try VolumeEntry.entries(ofFolder: folder, include: include)
+    #expect(entries.map { $0.path.joined(separator: "/") } == ["Developer.info", "Fonts", "Fonts/short.font"])
+    // A rejected directory is not looked into.
+    #expect(!asked.contains("Developer/include") && !asked.contains("\(long)/inside"))
+    var reader = VolumeReader(image: try FastFileSystem.hardfile(from: [folder], freeBytes: 0, include: include))
+    reader.visited = [0, 1, reader.root]
+    let expected: [String: [UInt8]?] = ["Developer.info": [5], "Fonts": nil, "Fonts/short.font": [2]]
+    #expect(reader.tree(reader.root) == expected)
+
+    // In an archive, what is below a rejected directory goes too.
+    var archive = member(level: 0, method: "-lh0-", name: Array("Developer\\include\\big.h".utf8), packed: [1], original: [1])
+    archive += member(level: 0, method: "-lh0-", name: Array("Fonts\\short.font".utf8), packed: [2], original: [2])
+    let archiveURL = base.appendingPathComponent("CD.lha")
+    try Data(archive + [0]).write(to: archiveURL)
+    #expect(try VolumeEntry.entries(of: archiveURL).count == 2)
+    #expect(try VolumeEntry.entries(of: archiveURL) { $0 != ["Developer"] }.map(\.path) == [["Fonts", "short.font"]])
+}

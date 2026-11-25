@@ -80,6 +80,10 @@ public enum FastFileSystem {
         }
     }
 
+    /// Whether a file, directory or volume can have this name: 1 to 30 ISO Latin-1
+    /// characters, none of them a control character, `/` or `:`.
+    public static func canStore(name: String) -> Bool { (try? bytes(ofName: name)) != nil }
+
     /// The name in ISO Latin-1, as stored on disk.
     static func bytes(ofName name: String) throws -> [UInt8] {
         let scalars = name.unicodeScalars

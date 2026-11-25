@@ -7,11 +7,17 @@ var name: String?
 var freeBytes: Int?
 var startup: String?
 var list = false
+var excluded: [[String]] = []
+var skipNames = false
 var extract = false
 while let first = arguments.first, first.hasPrefix("--") {
     arguments.removeFirst()
     if first == "--list" { list = true }
     else if first == "--extract" { extract = true }
+    else if first == "--skip-long-names" { skipNames = true }
+    else if first == "--exclude", !arguments.isEmpty { // a path from the top of a source, any case
+        excluded.append(arguments.removeFirst().lowercased().split(separator: "/").map(String.init))
+    }
     else if first == "--name", !arguments.isEmpty { name = arguments.removeFirst() }
     else if first == "--startup", !arguments.isEmpty { // each use adds a line
         startup = (startup.map { $0 + "\n" } ?? "") + arguments.removeFirst()
@@ -23,7 +29,8 @@ while let first = arguments.first, first.hasPrefix("--") {
 }
 guard list ? arguments.count == 1 : extract ? arguments.count == 2 : arguments.count >= 2 else {
     print("""
-    Usage: MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... <folder | archive.lha>... <output.hdf>
+    Usage: MakeHardfile [--name VOLUME] [--free MiB] [--startup "COMMAND"]... [--exclude PATH]...
+                        [--skip-long-names] <folder | archive.lha>... <output.hdf>
            MakeHardfile --list <folder | archive.lha>
            MakeHardfile --extract <archive.lha> <new folder>
     """)
@@ -55,7 +62,16 @@ do {
         print("\(output): \(entries.count) entries")
     } else {
         let sources = arguments.dropLast().map { URL(fileURLWithPath: $0) }
-        let image = try FastFileSystem.hardfile(from: sources, name: name, freeBytes: freeBytes, startupSequence: startup)
+        var skipped: [String] = []
+        let image = try FastFileSystem.hardfile(from: sources, name: name, freeBytes: freeBytes, startupSequence: startup) { path in
+            if excluded.contains(path.map { $0.lowercased() }) { return false }
+            if skipNames, let last = path.last, !FastFileSystem.canStore(name: last) {
+                skipped.append(path.joined(separator: "/"))
+                return false
+            }
+            return true
+        }
+        for path in skipped { print("Left out (an Amiga volume cannot hold this name): \(path)") }
         try Data(image).write(to: URL(fileURLWithPath: output))
         print("\(output): \(image.count) bytes, \(image.count / HardDisk.cylinderSize) cylinders")
     }
