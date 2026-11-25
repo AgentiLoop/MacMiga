@@ -40,6 +40,9 @@ struct KickstartProbe {
                 print("Diagnostic: \(error)")
             }
             print("Frames completed: \(machine.memory.video.frameCount)")
+            let custom = machine.memory.custom
+            print(String(format: "BPLCON0=$%04X DIW=$%04X-$%04X DDF=$%04X-$%04X", custom.register(0x100), custom.register(0x08E), custom.register(0x090), custom.register(0x092), custom.register(0x094)))
+            print("COLOR00-07: " + (0..<8).map { String(format: "$%03X", custom.register(0x180 + $0 * 2)) }.joined(separator: " "))
             if let directory = frameDirectory {
                 let name = URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
                 let url = URL(fileURLWithPath: directory).appendingPathComponent(name + ".png")

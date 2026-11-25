@@ -16,6 +16,10 @@ public struct CustomChips: Equatable, Sendable {
         public static let diwstrt = 0x08E, diwstop = 0x090, ddfstrt = 0x092, ddfstop = 0x094
         public static let bpl1pth = 0x0E0, bplcon0 = 0x100, bplcon1 = 0x102, bplcon2 = 0x104
         public static let bpl1mod = 0x108, bpl2mod = 0x10A, color00 = 0x180
+        public static let bltcon0 = 0x040, bltcon1 = 0x042, bltafwm = 0x044, bltalwm = 0x046
+        public static let bltcpth = 0x048, bltsize = 0x058
+        public static let bltcmod = 0x060, bltbmod = 0x062, bltamod = 0x064, bltdmod = 0x066
+        public static let bltcdat = 0x070, bltbdat = 0x072, bltadat = 0x074
     }
 
     /// PAL frame geometry in colour clocks (one colour clock = two CPU clocks).
@@ -34,6 +38,12 @@ public struct CustomChips: Equatable, Sendable {
     public internal(set) var bitplanePointers = [UInt32](repeating: 0, count: 6)
     /// Pending COPJMP strobe (1 or 2), consumed by the Copper; 0 when none.
     var copperJump = 0
+    /// Live Blitter pointers in register order: C, B, A, D.
+    public internal(set) var blitterPointers = [UInt32](repeating: 0, count: 4)
+    /// Set by a BLTSIZE write until the Blitter has run the operation.
+    public internal(set) var blitPending = false
+    /// DMACONR BZERO: the last blit produced only zero D data.
+    var blitterZero = false
 
     public init() {}
 
@@ -50,7 +60,7 @@ public struct CustomChips: Equatable, Sendable {
 
     public mutating func readWord(offset: Int) -> UInt16 {
         switch offset & 0x1FE {
-        case Register.dmaconr: return dmacon // BBUSY/BZERO (bits 14/13) read 0: no Blitter yet
+        case Register.dmaconr: return dmacon | (blitterZero ? 0x2000 : 0) // BBUSY: blits finish at once
         case Register.vposr: return UInt16(verticalPosition >> 8) & 0x0001 // PAL OCS Agnus ID 0, LOF 0
         case Register.vhposr: return UInt16(verticalPosition & 0xFF) << 8 | UInt16(horizontalPosition & 0xFF)
         case Register.adkconr: return adkcon
@@ -72,6 +82,13 @@ public struct CustomChips: Equatable, Sendable {
         case Register.adkcon: Self.setClear(&adkcon, value, mask: 0x7FFF)
         case Register.copjmp1: copperJump = 1
         case Register.copjmp2: copperJump = 2
+        case Register.bltsize: blitPending = true
+        case Register.bltcpth...(Register.bltcpth + 0xE):
+            let channel = (register - Register.bltcpth) >> 2
+            let pointer = blitterPointers[channel]
+            blitterPointers[channel] = register & 2 == 0
+                ? (pointer & 0xFFFF) | UInt32(value & 0x001F) << 16
+                : (pointer & 0x1F_0000) | UInt32(value & 0xFFFE)
         case Register.bpl1pth...(Register.bpl1pth + 0x16):
             let plane = (register - Register.bpl1pth) >> 2
             let pointer = bitplanePointers[plane]

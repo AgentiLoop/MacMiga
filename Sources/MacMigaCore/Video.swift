@@ -77,6 +77,7 @@ extension AmigaMemory {
                 custom.copperJump = 0
             }
             if custom.dmacon & 0x0280 == 0x0280 { stepCopper() }
+            if custom.blitPending { runPendingBlit() }
             let line = custom.verticalPosition
             let (lineEnded, frameEnded) = custom.stepBeam()
             if lineEnded {
