@@ -101,9 +101,21 @@ public struct AmigaMemory: M68KBus {
         ciaA.portA = enabled ? ciaA.portA | 0x01 : ciaA.portA & ~0x01
     }
 
-    /// Resets both CIAs (restoring the overlay) without clearing RAM, then fetches
-    /// the CPU reset vectors. This is not an implementation of the CPU's RESET instruction.
+    /// Resets the devices, then fetches the CPU reset vectors (through the ROM overlay the
+    /// reset has just restored).
     public mutating func reset() throws -> ResetVectors {
+        resetDevices()
+        return try ResetVectors(
+            supervisorStackPointer: readLong(at: 0),
+            programCounter: readLong(at: 4)
+        )
+    }
+
+    /// The reset line, as driven at power-on, by the keyboard reset, or by the CPU's RESET
+    /// instruction: both CIAs (which restores the ROM overlay), the custom chips, the
+    /// floppy drive's latches and the expansion boards return to their power-on state.
+    /// RAM keeps its contents.
+    public mutating func resetDevices() {
         ciaA = CIA8520()
         ciaB = CIA8520()
         custom = CustomChips(agnus: custom.agnus)
@@ -114,10 +126,6 @@ public struct AmigaMemory: M68KBus {
         expansion.install(fastRAMSize: fastRAM.count, hardDisk: hardDisk != nil)
         fastRAMBase = .max
         hardDiskController = HardDiskController()
-        return try ResetVectors(
-            supervisorStackPointer: readLong(at: 0),
-            programCounter: readLong(at: 4)
-        )
     }
 
     /// `$F00000`–`$F7FFFF` is the diagnostic/extended-ROM slot, empty on a stock A500.

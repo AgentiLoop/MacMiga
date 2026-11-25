@@ -121,3 +121,36 @@ private func store(_ words: [UInt16], at address: UInt32, in memory: inout Amiga
     #expect(machine.cpu.programCounter == 0xFC_0008)
     #expect(machine.cpu[data: 0] == 0xFFFF_FFFF) // general registers are kept
 }
+
+@Test func resetInstructionResetsTheChipsTheOverlayAndTheExpansionBoards() throws {
+    var rom = [UInt8](repeating: 0, count: 256 * 1024)
+    rom.replaceSubrange(0..<8, with: [0, 8, 0, 0, 0, 0xFC, 0, 8])
+    rom.replaceSubrange(8..<10, with: [0x70, 0x2A])         // $FC0008 moveq #42,d0
+    var machine = try AmigaMachine(kickstart: rom, fastRAMSize: 1 << 20)
+    machine.memory.setOverlay(enabled: false)
+    try machine.memory.writeByte(0x00, at: 0xE8_004A)       // configure the fast RAM board at $200000
+    try machine.memory.writeByte(0x20, at: 0xE8_0048)
+    try machine.memory.writeLong(0xCAFE_F00D, at: 0x20_0000)
+    try machine.memory.writeWord(0x8200, at: 0xDF_F096)     // DMACON DMAEN
+    try machine.memory.writeWord(0xC020, at: 0xDF_F09A)     // INTENA
+    // Code in chip RAM that the overlay will hide: reset ; jmp (a0)
+    try machine.memory.writeWord(0x4E70, at: 0x1000)
+    try machine.memory.writeWord(0x4ED0, at: 0x1002)
+    machine.cpu.programCounter = 0x1000
+    machine.cpu[address: 0] = 0xFC_0008
+    try machine.step()
+    #expect(machine.memory.overlayEnabled)
+    #expect(machine.memory.custom.dmacon == 0 && machine.memory.custom.intena == 0)
+    #expect(machine.memory.expansion.boards.map(\.base) == [nil])
+    #expect(try machine.memory.readLong(at: 0x20_0000) == 0) // the board is off the bus
+    #expect(try machine.memory.readWord(at: 0x1002) != 0x4ED0) // ROM is in front of the code
+    #expect(machine.cpu.statusRegister == 0x2700)
+    try machine.step()                                       // the prefetched jmp (a0)
+    #expect(machine.cpu.programCounter == 0xFC_0008)
+    try machine.step()
+    #expect(machine.cpu[data: 0] == 42)
+    // The fast RAM kept its contents and comes back where it is configured.
+    try machine.memory.writeByte(0x00, at: 0xE8_004A)
+    try machine.memory.writeByte(0x20, at: 0xE8_0048)
+    #expect(try machine.memory.readLong(at: 0x20_0000) == 0xCAFE_F00D)
+}

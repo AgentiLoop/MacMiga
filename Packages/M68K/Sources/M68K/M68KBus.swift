@@ -14,6 +14,14 @@ public protocol M68KBus {
     mutating func writeByte(_ value: UInt8, at address: UInt32) throws
     mutating func writeWord(_ value: UInt16, at address: UInt32) throws
     mutating func writeLong(_ value: UInt32, at address: UInt32) throws
+    /// The CPU executed RESET and drives its reset line: every device returns to its
+    /// power-on state. The CPU itself and the contents of memory are not affected. The
+    /// default does nothing.
+    mutating func resetDevices()
+}
+
+extension M68KBus {
+    @inlinable public mutating func resetDevices() {}
 }
 
 /// Word and long accesses as the 68000 makes them: an odd address is an address error and

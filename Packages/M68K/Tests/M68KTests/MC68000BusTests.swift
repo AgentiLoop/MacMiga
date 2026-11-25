@@ -139,3 +139,83 @@ private func start(_ program: [UInt16]) throws -> (MC68000, RAM) {
     #expect(cpu.programCounter == 0x700)
     #expect(try memory.readLong(at: 0x7FF0) == 0x800)
 }
+
+/// RAM whose `$400`–`$FFF` is hidden behind ILLEGAL opcodes after a reset, the way a boot
+/// ROM overlay hides low memory. It counts the resets it is given.
+private struct OverlayBus: M68KBus {
+    var ram: RAM
+    var resets = 0
+    var hidden = false
+
+    init(program: [UInt16]) throws { ram = try RAM(program: program) }
+
+    mutating func readByte(at address: UInt32) throws -> UInt8 {
+        hidden && (0x400..<0x1000).contains(address) ? (address & 1 == 0 ? 0x4A : 0xFC) : try ram.readByte(at: address)
+    }
+    mutating func readWord(at address: UInt32) throws -> UInt16 {
+        UInt16(try readByte(at: address)) << 8 | UInt16(try readByte(at: address &+ 1))
+    }
+    mutating func readLong(at address: UInt32) throws -> UInt32 {
+        UInt32(try readWord(at: address)) << 16 | UInt32(try readWord(at: address &+ 2))
+    }
+    mutating func writeByte(_ value: UInt8, at address: UInt32) throws { try ram.writeByte(value, at: address) }
+    mutating func writeWord(_ value: UInt16, at address: UInt32) throws { try ram.writeWord(value, at: address) }
+    mutating func writeLong(_ value: UInt32, at address: UInt32) throws { try ram.writeLong(value, at: address) }
+
+    mutating func resetDevices() {
+        resets += 1
+        hidden = true
+    }
+}
+
+@Test func resetInstructionResetsTheDevicesAndKeepsThePrefetchedOpcode() throws {
+    var memory = try OverlayBus(program: [0x4E70, 0x4ED0]) // $400 reset ; $402 jmp (a0)
+    try memory.writeWord(0x7007, at: 0x2000)               // moveq #7,d0
+    var cpu = MC68000()
+    try cpu.reset(memory: &memory)
+    cpu[address: 0] = 0x2000
+    try cpu.step(memory: &memory)
+    #expect(memory.resets == 1)
+    #expect(cpu.programCounter == 0x402)
+    #expect(cpu.statusRegister == 0x2700 && cpu.supervisorStackPointer == 0x8000) // the CPU is not reset
+    #expect(try memory.readWord(at: 0x402) == 0x4AFC)      // the code is hidden now…
+    try cpu.step(memory: &memory)                          // …but JMP (A0) was already fetched
+    #expect(cpu.programCounter == 0x2000)
+    try cpu.step(memory: &memory)
+    #expect(cpu[data: 0] == 7)
+    #expect(memory.resets == 1)
+}
+
+@Test func resetIsPrivilegedAndAnInterruptDiscardsThePrefetch() throws {
+    var memory = try OverlayBus(program: [0x4E70, 0x4ED0])
+    try memory.writeLong(0x3000, at: 8 * 4)                // privilege violation
+    try memory.writeLong(0x3000, at: 31 * 4)               // level 7 autovector
+    try memory.writeWord(0x4E73, at: 0x3000)               // rte
+    try memory.writeLong(0x3100, at: 4 * 4)                // illegal instruction
+    var cpu = MC68000()
+    try cpu.reset(memory: &memory)
+    cpu.statusRegister = 0x0000                            // user mode
+    cpu.userStackPointer = 0x7000
+    try cpu.step(memory: &memory)
+    #expect(memory.resets == 0)
+    #expect(cpu.programCounter == 0x3000)
+    #expect(try memory.readLong(at: 0x8000 - 4) == 0x400)
+
+    cpu = MC68000()
+    try cpu.reset(memory: &memory)
+    try cpu.step(memory: &memory)                          // RESET in supervisor mode
+    #expect(memory.resets == 1)
+    #expect(try cpu.interrupt(level: 7, memory: &memory))
+    try cpu.step(memory: &memory)                          // rte, back to $402
+    #expect(cpu.programCounter == 0x402)
+    try cpu.step(memory: &memory)                          // fetched from the bus now: ILLEGAL
+    #expect(cpu.programCounter == 0x3100)
+}
+
+@Test func resetOnABusWithoutDevicesOnlyMovesOn() throws {
+    var (cpu, memory) = try start([0x4E70, 0x7001])        // reset ; moveq #1,d0
+    try cpu.step(memory: &memory)
+    #expect(cpu.programCounter == 0x402)
+    try cpu.step(memory: &memory)
+    #expect(cpu[data: 0] == 1)
+}

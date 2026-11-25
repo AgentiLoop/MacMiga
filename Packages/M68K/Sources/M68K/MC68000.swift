@@ -20,6 +20,10 @@ public struct MC68000: Equatable, Sendable {
     public var supervisorStackPointer: UInt32 = 0
     /// Set by STOP; the CPU executes nothing until an accepted interrupt clears it.
     @inlinable public var isStopped: Bool { stopped }
+    /// The opcode after a RESET instruction, fetched before the devices were reset, as the
+    /// 68000's prefetch does. Software relies on it when the reset changes the memory map
+    /// under the running code (`RESET` followed by a one-word `JMP (An)`).
+    @usableFromInline var prefetchedOpcode: UInt16?
     @usableFromInline var stopped = false
     /// When false (hardware behaviour), unassigned opcodes and invalid addressing modes take the
     /// illegal-instruction exception (vector 4, stacked PC = the opcode's address). When true,
@@ -70,6 +74,7 @@ public struct MC68000: Equatable, Sendable {
         let stackPointer = try memory.readAlignedLong(at: 0)
         let entry = try memory.readAlignedLong(at: 4)
         status = (status & 0x001F) | 0x2700
+        prefetchedOpcode = nil
         supervisorStackPointer = stackPointer
         programCounter = entry
     }
@@ -83,15 +88,22 @@ public struct MC68000: Equatable, Sendable {
     /// vector table. Bus/address errors and trace are not modelled yet; see `interrupt(level:memory:)`.
     @inlinable public mutating func step<Bus: M68KBus>(memory: inout Bus) throws {
         guard !isStopped else { return }
+        let prefetched = prefetchedOpcode
+        prefetchedOpcode = nil
         do {
-            try execute(memory: &memory)
-        } catch let trap as Trap {
-            if let condition = trap.condition { status = (status & 0xFF00) | condition }
-            try enterException(vector: trap.vector, returnAddress: trap.returnAddress, memory: &memory)
-        } catch CPUError.unsupportedInstruction(_, let address) where !stopsOnIllegalInstruction {
-            try enterException(vector: 4, returnAddress: address, memory: &memory)
-        } catch CPUError.addressError(let address, let isWrite) where !stopsOnAddressError {
-            try enterAddressError(accessAddress: address, write: isWrite, memory: &memory)
+            do {
+                try execute(prefetched: prefetched, memory: &memory)
+            } catch let trap as Trap {
+                if let condition = trap.condition { status = (status & 0xFF00) | condition }
+                try enterException(vector: trap.vector, returnAddress: trap.returnAddress, memory: &memory)
+            } catch CPUError.unsupportedInstruction(_, let address) where !stopsOnIllegalInstruction {
+                try enterException(vector: 4, returnAddress: address, memory: &memory)
+            } catch CPUError.addressError(let address, let isWrite) where !stopsOnAddressError {
+                try enterAddressError(accessAddress: address, write: isWrite, memory: &memory)
+            }
+        } catch {
+            prefetchedOpcode = prefetched
+            throw error
         }
     }
 
@@ -128,6 +140,7 @@ public struct MC68000: Equatable, Sendable {
         guard (1...7).contains(level), level == 7 || level > Int((status >> 8) & 7) else { return false }
         var next = self
         next.stopped = false
+        next.prefetchedOpcode = nil
         try next.enterException(vector: 24 + level, returnAddress: programCounter, memory: &memory)
         next.status = (next.status & 0xF8FF) | UInt16(level) << 8
         self = next
@@ -211,9 +224,9 @@ public struct MC68000: Equatable, Sendable {
         return result
     }
 
-    @inlinable mutating func execute<Bus: M68KBus>(memory: inout Bus) throws {
+    @inlinable mutating func execute<Bus: M68KBus>(prefetched: UInt16?, memory: inout Bus) throws {
         let instructionAddress = programCounter
-        let opcode = try memory.readAlignedWord(at: instructionAddress)
+        let opcode = try prefetched ?? memory.readAlignedWord(at: instructionAddress)
         let nextWord = instructionAddress &+ 2
 
         switch opcode {
@@ -488,8 +501,10 @@ public struct MC68000: Equatable, Sendable {
         case 0x4AFC, 0x4E7A, 0x4E7B:
             // ILLEGAL, and MOVEC (68010+), which Kickstart executes to detect the CPU type.
             throw Trap(vector: 4, returnAddress: instructionAddress)
-        case 0x4E70: // RESET: privileged; resetting external devices is not modelled yet.
+        case 0x4E70: // RESET: privileged; resets the devices on the bus, not the CPU.
             guard supervisor else { throw privilege }
+            prefetchedOpcode = try memory.readAlignedWord(at: cursor)
+            memory.resetDevices()
         case 0x4E72: // STOP #imm: load SR and wait for an interrupt.
             guard supervisor else { throw privilege }
             statusRegister = try extensionWord(cursor: &cursor, memory: &memory)
