@@ -56,9 +56,8 @@ extension FastFileSystem {
     /// named `name`, or after the first folder or archive (characters AmigaDOS does not
     /// allow become `_`, and the name is cut to 30 characters), and dated now.
     /// `startupSequence`, if given, becomes the text of `S/Startup-Sequence`, replacing one
-    /// from the sources. Without one, `autoStart` makes a startup-sequence that runs the
-    /// sources' only AmigaDOS program (WHDLoad slaves aside), if they have exactly one and no
-    /// `S/Startup-Sequence`. Files and directories whose path `include` rejects are left out.
+    /// from the sources. Without one, `autoStart` makes a startup-sequence (see
+    /// `VolumeEntry.startupSequence(for:)`) if the sources have none. Files and directories whose path `include` rejects are left out.
     /// `fastFileSystem` false writes an OFS volume, for Kickstart 1.x; `international` the
     /// international mode.
     public static func hardfile(from sources: [URL], name: String? = nil, freeBytes: Int? = nil,
@@ -75,17 +74,7 @@ extension FastFileSystem {
         let date = AmigaDate(year: now.year ?? 1978, month: now.month ?? 1, day: now.day ?? 1,
                              hour: now.hour ?? 0, minute: now.minute ?? 0, second: now.second ?? 0)
         var startupSequence = startupSequence
-        if startupSequence == nil, autoStart,
-           !entries.contains(where: { $0.path.map { $0.lowercased() } == ["s", "startup-sequence"] }) {
-            let programs = entries.filter { entry in
-                guard let contents = entry.contents, let last = entry.path.last else { return false }
-                return contents.starts(with: [0, 0, 3, 0xF3]) && !last.lowercased().hasSuffix(".slave")
-            }
-            // A path with spaces is quoted for the shell.
-            if programs.count == 1, case let path = programs[0].path.joined(separator: "/") {
-                startupSequence = path.contains(" ") ? "\"\(path)\"" : path
-            }
-        }
+        if startupSequence == nil, autoStart { startupSequence = VolumeEntry.startupSequence(for: entries) }
         if let startupSequence {
             // AmigaDOS reads scripts as ISO Latin-1 (accents composed, as macOS may pass
             // them decomposed); other characters become `?`.
@@ -94,5 +83,39 @@ extension FastFileSystem {
         }
         return try hardfile(named: name ?? (fallback.isEmpty ? "MacMigaHD" : fallback), entries: entries,
                             freeBytes: freeBytes, date: date, fastFileSystem: fastFileSystem, international: international)
+    }
+}
+
+extension VolumeEntry {
+    /// Whether the entry is an AmigaDOS load file (it starts with HUNK_HEADER).
+    var isProgram: Bool { contents?.starts(with: [0, 0, 3, 0xF3]) == true }
+
+    /// The WHDLoad slaves among the entries: programs named `*.slave`.
+    public static func whdloadSlaves(in entries: [VolumeEntry]) -> [VolumeEntry] {
+        entries.filter { $0.isProgram && $0.path.last?.lowercased().hasSuffix(".slave") == true }
+    }
+
+    /// The WHDLoad program among the entries: a program named `WHDLoad` in a `C` directory.
+    public static func whdload(in entries: [VolumeEntry]) -> VolumeEntry? {
+        entries.first { $0.isProgram && $0.path.count >= 2 && $0.path.suffix(2).map { $0.lowercased() } == ["c", "whdload"] }
+    }
+
+    /// A startup-sequence that starts the entries' software, for entries without
+    /// `S/Startup-Sequence`: with exactly one WHDLoad slave and the WHDLoad program, WHDLoad
+    /// starts the slave from its directory; otherwise the only program (slaves and WHDLoad
+    /// aside) is run. Nil when there is a startup-sequence already or nothing unambiguous to start.
+    public static func startupSequence(for entries: [VolumeEntry]) -> String? {
+        guard !entries.contains(where: { $0.path.map { $0.lowercased() } == ["s", "startup-sequence"] }) else { return nil }
+        // Paths with spaces are quoted for the shell.
+        func quoted(_ text: String) -> String { text.contains(" ") ? "\"\(text)\"" : text }
+        let slaves = whdloadSlaves(in: entries)
+        if slaves.count == 1, let whdload = whdload(in: entries) {
+            let slave = slaves[0].path
+            return (slave.count > 1 ? "CD \(quoted(slave.dropLast().joined(separator: "/")))\n" : "")
+                + "\(quoted("SYS:" + whdload.path.joined(separator: "/"))) \(quoted(slave.last!)) PRELOAD"
+        }
+        let whdloadPath = whdload(in: entries)?.path
+        let programs = entries.filter { $0.isProgram && $0.path != whdloadPath && $0.path.last?.lowercased().hasSuffix(".slave") == false }
+        return programs.count == 1 ? quoted(programs[0].path.joined(separator: "/")) : nil
     }
 }

@@ -722,7 +722,8 @@ the option can be repeated). `--skip-long-names` leaves out, and lists, the
 files and directories whose names an Amiga volume cannot hold, instead of
 stopping at the first one. `--auto` writes a startup-sequence that runs the
 sources' only program when they have exactly one (WHDLoad `.slave` files are
-not counted) and no startup-sequence of their own; `--ofs` writes the old file
+not counted; with one slave and WHDLoad itself among the sources, it starts the
+slave through WHDLoad, see "WHDLoad") and no startup-sequence of their own; `--ofs` writes the old file
 system, for Kickstart 1.x; `--intl` the international mode (`DOS\3`, or
 `DOS\2` with `--ofs`), in which names also match regardless of the case of
 accented letters (Kickstart 2.04 and later). The `--startup` text is written in
@@ -792,8 +793,20 @@ operated; it calls the same code as the tool (with one source).
 WHDLoad runs installed games from a hard disk. It is not part of MacMiga: get
 the WHDLoad package from whdload.de and the install for a game you own, and
 put both on one hardfile. WHDLoad needs Kickstart 2.0 or newer and more memory
-than the stock machine has, so use Kickstart 3.1 and turn on Machine ▸ 8 MB
-Fast RAM (`--fast` in the probe).
+than the stock machine has, so use Kickstart 3.1 and turn on Machine ▸ Fast
+RAM (`--fast` in the probe).
+
+In the app, Machine ▸ New Hard Disk from Folder or LHA… recognises an install
+(exactly one `*.slave` program and no WHDLoad): it offers to add WHDLoad's
+archive or folder (remembered for next time), writes a startup-sequence that
+changes to the install's directory and starts WHDLoad with the slave, and
+turns on 8 MB of fast RAM if there was none. `MakeHardfile --auto` writes the
+same startup-sequence when the sources include WHDLoad (a program `C/WHDLoad`
+anywhere): `MakeHardfile --auto pacman_HD.lha WHDLoad_usr_small.lha whd.hdf`
+gave `CD pacman_HD` and `SYS:WHDLoad/C/WHDLoad pacman.slave PRELOAD`, and the
+probe (Kickstart 3.1, 8 MiB fast RAM) showed the game running from fast RAM
+with the same display registers and palette as below. The app's dialogs were
+not operated in this check.
 
 ```sh
 swift run -c release MakeHardfile --name WHD \

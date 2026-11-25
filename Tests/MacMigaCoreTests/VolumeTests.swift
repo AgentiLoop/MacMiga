@@ -619,3 +619,28 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
     #expect(try LHA.unpack(member(level: 0, method: "-lzs-", name: Array("f".utf8), packed: packed, original: original))
         .first?.contents == original)
 }
+
+@Test func autoStartUsesWHDLoadForASlave() {
+    let program: [UInt8] = [0, 0, 3, 0xF3, 0, 0, 0, 0]
+    func file(_ path: String, _ contents: [UInt8]? = nil) -> VolumeEntry {
+        VolumeEntry(path: path.split(separator: "/").map(String.init), contents: contents ?? program, date: stamp)
+    }
+    let game = [file("pacman_HD/pacman"), file("pacman_HD/pacman.slave"), file("pacman_HD/readme.md", [1])]
+    let whdload = [file("WHDLoad/C/WHDLoad"), file("WHDLoad/C/WHDLoad.info", [1])]
+    // Without WHDLoad the game's own program starts; with it, WHDLoad starts the slave.
+    #expect(VolumeEntry.startupSequence(for: game) == "pacman_HD/pacman")
+    #expect(VolumeEntry.whdloadSlaves(in: game).map(\.path) == [["pacman_HD", "pacman.slave"]])
+    #expect(VolumeEntry.whdload(in: game) == nil)
+    #expect(VolumeEntry.startupSequence(for: game + whdload) == "CD pacman_HD\nSYS:WHDLoad/C/WHDLoad pacman.slave PRELOAD")
+    #expect(VolumeEntry.whdload(in: game + whdload)?.path == ["WHDLoad", "C", "WHDLoad"])
+    // Spaces are quoted, a slave at the top needs no CD, and a C:WHDLoad in the root counts.
+    #expect(VolumeEntry.startupSequence(for: [file("My Game/Game.Slave"), file("C/WHDLoad")])
+            == "CD \"My Game\"\nSYS:C/WHDLoad Game.Slave PRELOAD")
+    #expect(VolumeEntry.startupSequence(for: [file("Game.slave"), file("Tools/C/WHDLoad")]) == "SYS:Tools/C/WHDLoad Game.slave PRELOAD")
+    // Two slaves or a startup-sequence of the install's own: nothing is guessed.
+    #expect(VolumeEntry.startupSequence(for: [file("a/A.slave"), file("b/B.slave"), file("C/WHDLoad")]) == nil)
+    #expect(VolumeEntry.startupSequence(for: game + whdload + [file("S/Startup-Sequence", [0x41])]) == nil)
+    // A WHDLoad that is not a program, or not in a C directory, is not WHDLoad.
+    #expect(VolumeEntry.startupSequence(for: [file("g/G.slave"), file("C/WHDLoad", [1])]) == nil)
+    #expect(VolumeEntry.startupSequence(for: [file("g/G.slave"), file("Tools/WHDLoad")]) == "Tools/WHDLoad")
+}

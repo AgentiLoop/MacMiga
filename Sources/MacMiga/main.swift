@@ -407,6 +407,8 @@ final class DisplayView: NSView {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let emulator = Emulator()
     var window: NSWindow!
+    /// The Fast RAM submenu, whose check marks change when a WHDLoad disk turns fast RAM on.
+    private var fastRAMMenu: NSMenu?
     let view = DisplayView(frame: NSRect(x: 0, y: 0, width: Video.width, height: Video.height * 2))
     var timer: Timer?
 
@@ -553,13 +555,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func detachHardDisk() { attach(hardDisk: nil) }
 
     /// Builds a hardfile from a Mac folder or an LHA archive, saves it where the user chooses
-    /// and attaches it, so that what the Amiga writes later is kept in that file.
+    /// and attaches it, so that what the Amiga writes later is kept in that file. A WHDLoad
+    /// install without WHDLoad gets WHDLoad's archive added if the user picks it, and the
+    /// startup-sequence then starts the game through WHDLoad, which needs fast RAM.
     @objc func newHardDisk() {
         let open = NSOpenPanel()
         open.message = "Choose a folder or an LHA archive to make a hard disk from"
         open.canChooseDirectories = true
         open.allowedContentTypes = ["lha", "lzh"].compactMap { UTType(filenameExtension: $0) }
         guard open.runModal() == .OK, let source = open.url else { return }
+        var sources = [source]
+        let entries = (try? VolumeEntry.entries(of: source)) ?? []
+        if VolumeEntry.whdloadSlaves(in: entries).count == 1, VolumeEntry.whdload(in: entries) == nil {
+            let question = NSAlert()
+            question.messageText = "\(source.lastPathComponent) is a WHDLoad install"
+            question.informativeText = "Add WHDLoad to the disk to start it through WHDLoad (choose WHDLoad's archive or folder, "
+                + "for example WHDLoad_usr.lha from whdload.de). WHDLoad needs Kickstart 2.0 or later and fast RAM."
+            question.addButton(withTitle: "Add WHDLoad…")
+            question.addButton(withTitle: "Without WHDLoad")
+            question.addButton(withTitle: "Cancel")
+            switch question.runModal() {
+            case .alertFirstButtonReturn:
+                let pick = NSOpenPanel()
+                pick.message = "Choose WHDLoad's archive or folder"
+                pick.canChooseDirectories = true
+                pick.allowedContentTypes = ["lha", "lzh"].compactMap { UTType(filenameExtension: $0) }
+                if let last = UserDefaults.standard.url(forKey: "WHDLoadArchive") { pick.directoryURL = last.deletingLastPathComponent() }
+                guard pick.runModal() == .OK, let whdload = pick.url else { return }
+                UserDefaults.standard.set(whdload, forKey: "WHDLoadArchive")
+                sources.append(whdload)
+            case .alertSecondButtonReturn: break
+            default: return
+            }
+        }
         let save = NSSavePanel()
         save.message = "Save the new hard disk image"
         save.allowedContentTypes = ["hdf"].compactMap { UTType(filenameExtension: $0) }
@@ -569,11 +597,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             // Kickstart 1.x (before version 36) has no Fast File System in ROM.
             let version = emulator.romURL.flatMap { try? Data(contentsOf: $0) }.map { $0.count > 13 ? Int($0[12]) << 8 | Int($0[13]) : 0 }
-            try Data(try FastFileSystem.hardfile(from: [source], autoStart: true,
+            try Data(try FastFileSystem.hardfile(from: sources, autoStart: true,
                                                  fastFileSystem: (version ?? 40) >= 36)).write(to: destination)
         } catch {
             alert("Could not make a hard disk from \(source.lastPathComponent): \(error)")
             return
+        }
+        // WHDLoad cannot start a game without fast RAM ("Can't allocate ExpMem").
+        if sources.count > 1, emulator.fastRAM == 0 {
+            try? emulator.setFastRAM(megabytes: 8)
+            fastRAMMenu?.items.forEach { $0.state = $0.tag == emulator.fastRAM ? .on : .off }
         }
         attach(hardDisk: destination)
     }
@@ -616,6 +649,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         machine.addItem(withTitle: "New Hard Disk from Folder or LHA…", action: #selector(newHardDisk), keyEquivalent: "")
         machine.addItem(withTitle: "Detach Hard Disk", action: #selector(detachHardDisk), keyEquivalent: "")
         let fast = NSMenu(title: "Fast RAM")
+        fastRAMMenu = fast
         for size in Emulator.fastRAMSizes {
             let item = fast.addItem(withTitle: size == 0 ? "None" : "\(size) MB", action: #selector(chooseFastRAM(_:)), keyEquivalent: "")
             item.tag = size
