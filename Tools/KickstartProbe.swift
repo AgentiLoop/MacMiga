@@ -27,7 +27,7 @@ struct KickstartProbe {
                     try cpu.step(memory: &memory)
                     completed += 1
                 }
-                print("Stopped at the \(limit)-instruction limit; no boot success inferred.")
+                print(String(format: "Stopped at the %d-instruction limit at PC=$%08X SR=$%04X; no boot success inferred.", limit, cpu.programCounter, cpu.statusRegister))
             } catch {
                 print(String(format: "Stopped after %d completed instructions at PC=$%08X", completed, cpu.programCounter))
                 if let opcode = try? memory.readWord(at: cpu.programCounter) {
