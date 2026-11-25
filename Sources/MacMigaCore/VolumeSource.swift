@@ -44,13 +44,17 @@ extension VolumeEntry {
 }
 
 extension FastFileSystem {
-    /// Builds a hardfile from a Mac folder or from an LHA archive. The volume is named
-    /// `name`, or after the folder or archive (characters AmigaDOS does not allow become
-    /// `_`, and the name is cut to 30 characters), and dated now. `startupSequence`, if
-    /// given, becomes the text of `S/Startup-Sequence`, replacing one from the source.
-    public static func hardfile(from source: URL, name: String? = nil, freeBytes: Int? = nil,
+    /// Builds a hardfile from Mac folders and LHA archives, whose contents are merged into
+    /// one volume (a file found in several sources is taken from the last). The volume is
+    /// named `name`, or after the first folder or archive (characters AmigaDOS does not
+    /// allow become `_`, and the name is cut to 30 characters), and dated now.
+    /// `startupSequence`, if given, becomes the text of `S/Startup-Sequence`, replacing one
+    /// from the sources.
+    public static func hardfile(from sources: [URL], name: String? = nil, freeBytes: Int? = nil,
                                 startupSequence: String? = nil) throws -> [UInt8] {
-        var entries = try VolumeEntry.entries(of: source)
+        precondition(!sources.isEmpty)
+        var entries = try sources.flatMap { try VolumeEntry.entries(of: $0) }
+        let source = sources[0]
         let base = source.pathExtension.isEmpty ? source.lastPathComponent : source.deletingPathExtension().lastPathComponent
         let fallback = String(String.UnicodeScalarView(base.precomposedStringWithCanonicalMapping.unicodeScalars
             .map { $0.value < 0x20 || $0.value > 0xFF || $0 == "/" || $0 == ":" ? "_" : $0 }.prefix(30)))

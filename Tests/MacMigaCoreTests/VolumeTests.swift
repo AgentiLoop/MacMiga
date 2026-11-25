@@ -419,11 +419,34 @@ private let stamp = AmigaDate(year: 2026, month: 11, day: 25, hour: 12, minute: 
     let named = folder.deletingLastPathComponent().appendingPathComponent("Pac:Man.hd")
     try FileManager.default.moveItem(at: folder, to: named)
     defer { try? FileManager.default.removeItem(at: named) }
-    var reader = VolumeReader(image: try FastFileSystem.hardfile(from: named, freeBytes: 0, startupSequence: "game"))
+    var reader = VolumeReader(image: try FastFileSystem.hardfile(from: [named], freeBytes: 0, startupSequence: "game"))
     #expect(reader.name(reader.root) == "Pac_Man")
     reader.visited = [0, 1, reader.root]
     let tree = reader.tree(reader.root)
     #expect(tree["S/Startup-Sequence"] == .some(Array("game\n".utf8)))
     #expect(tree["game"] == .some([1, 2, 3]))
     #expect(tree.count == 4)
+}
+
+@Test func severalSourcesMergeIntoOneVolume() throws {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("MacMigaTests-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: base) }
+    let folder = base.appendingPathComponent("Game")
+    try FileManager.default.createDirectory(at: folder.appendingPathComponent("C"), withIntermediateDirectories: true)
+    try Data([1]).write(to: folder.appendingPathComponent("C/Tool"))
+    try Data([2]).write(to: folder.appendingPathComponent("readme"))
+    // An archive that adds a file to C, a new directory, and its own version of `readme`.
+    let text = Array("from the archive".utf8)
+    var archive = member(level: 0, method: "-lh0-", name: Array("c\\Loader".utf8), packed: [3], original: [3])
+    archive += member(level: 0, method: "-lh0-", name: Array("Data\\level".utf8), packed: [4, 5], original: [4, 5])
+    archive += member(level: 0, method: "-lh0-", name: Array("readme".utf8), packed: text, original: text)
+    let archiveURL = base.appendingPathComponent("Extra.lha")
+    try Data(archive + [0]).write(to: archiveURL)
+
+    var reader = VolumeReader(image: try FastFileSystem.hardfile(from: [folder, archiveURL], freeBytes: 0))
+    #expect(reader.name(reader.root) == "Game") // named after the first source
+    reader.visited = [0, 1, reader.root]
+    let expected: [String: [UInt8]?] = ["C": nil, "C/Tool": [1], "C/Loader": [3], "Data": nil, "Data/level": [4, 5],
+                                        "readme": text]
+    #expect(reader.tree(reader.root) == expected)
 }

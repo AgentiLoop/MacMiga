@@ -496,7 +496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         save.nameFieldStringValue = source.deletingPathExtension().lastPathComponent + ".hdf"
         guard save.runModal() == .OK, let destination = save.url else { return }
         do {
-            try Data(try FastFileSystem.hardfile(from: source)).write(to: destination)
+            try Data(try FastFileSystem.hardfile(from: [source])).write(to: destination)
         } catch {
             alert("Could not make a hard disk from \(source.lastPathComponent): \(error)")
             return
