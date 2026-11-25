@@ -78,3 +78,11 @@ private func customMemory() throws -> AmigaMemory {
     #expect(try memory.readLong(at: 0xD8_0000) == 0)
     #expect(throws: MemoryBusError.unmappedAddress(0xE0_0000)) { try memory.readByte(at: 0xE0_0000) }
 }
+
+@Test func ocsDeniseHasNoIDRegister() throws {
+    var memory = try customMemory()
+    // Kickstart 2.0+ takes a low byte of $FC here for an ECS Denise; an OCS Denise does not answer.
+    #expect(try memory.readWord(at: 0xDF_F07C) == 0xFFFF)
+    try memory.writeWord(0x00FC, at: 0xDF_F07C)
+    #expect(try memory.readWord(at: 0xDF_F07C) == 0xFFFF)
+}

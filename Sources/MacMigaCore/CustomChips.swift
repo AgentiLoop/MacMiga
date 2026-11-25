@@ -11,7 +11,7 @@ public struct CustomChips: Equatable, Sendable {
         public static let potgor = 0x016, serdatr = 0x018, dskbytr = 0x01A
         public static let intenar = 0x01C, intreqr = 0x01E
         public static let dmacon = 0x096, intena = 0x09A, intreq = 0x09C, adkcon = 0x09E
-        public static let dskpth = 0x020, dsklen = 0x024, dsksync = 0x07E
+        public static let dskpth = 0x020, dsklen = 0x024, deniseid = 0x07C, dsksync = 0x07E
         public static let joytest = 0x036, spr0pth = 0x120, spr0pos = 0x140
         public static let copcon = 0x02E, cop1lch = 0x080, cop2lch = 0x084
         public static let copjmp1 = 0x088, copjmp2 = 0x08A
@@ -100,6 +100,10 @@ public struct CustomChips: Equatable, Sendable {
         case Register.joy0dat: return UInt16(mouseY) << 8 | UInt16(mouseX)
         case Register.joy1dat: return joystick1.data
         case Register.serdatr, Register.dskbytr: return 0
+        // The OCS Denise has no ID register and leaves the bus alone. An undriven bus is
+        // modelled as all ones here, so Kickstart 2.0+ does not take it for an ECS Denise
+        // (which answers `$xxFC`).
+        case Register.deniseid: return 0xFFFF
         default: return 0 // write-only strobe/data registers; real hardware returns bus noise
         }
     }
