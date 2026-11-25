@@ -77,6 +77,10 @@ local package `Packages/M68K`). The build puts three programs in
 (see "Making a hard disk") and `KickstartProbe` (see "Local Kickstart startup
 probe").
 
+`Bundle/make-app.sh` makes a release build and wraps it in
+`.build/MacMiga.app`, with the icon drawn by `Bundle/MakeIcon.swift` and the
+`Info.plist` from `Bundle/`. The app is signed ad hoc.
+
 ## Run the app
 
 ```sh
