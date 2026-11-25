@@ -2,12 +2,10 @@
 
 A work-in-progress Commodore Amiga 500 emulator for macOS.
 
-**Current milestone: most of the MC68000 instruction set, CIAs and chipset
-registers, driven by a machine loop with interrupts.** Both local Kickstart ROMs
-now run their startup code, take vertical-blank and CIA interrupts, and reach
-the exec idle STOP. There is no
-application UI, video, audio or floppy yet. MacMiga does not boot AmigaOS or
-run games.
+**Current milestone: Copper, bitplane display and Blitter.** Both local
+Kickstart ROMs now draw their insert-disk screens into an emulated framebuffer
+(written to PNG by the probe). There is no application UI, audio, sprites, or
+disk media yet. MacMiga does not boot AmigaOS or run games.
 
 ## Build and test
 
@@ -117,6 +115,28 @@ not 68000 timing. That time advances the beam (1 colour clock = 2 CPU clocks;
 VERTB each frame) and both CIA timers (1 E clock = 10 CPU clocks). CIA-A TOD
 counts frames, CIA-B TOD counts lines. CIA-A /IRQ sets INTREQ PORTS (level 2),
 CIA-B /IRQ sets INTREQ EXTER (level 6).
+
+## Video, Copper and Blitter
+
+`Video.swift` steps the beam one colour clock at a time. The Copper (MOVE, WAIT,
+SKIP, COPJMP strobes, COPCON danger bit, restart at COP1LC each frame) runs while
+DMAEN and COPEN are set; each instruction takes 4 colour clocks. At the end of
+each line, bitplane DMA fetches 1–6 planes (lowres/hires, DDFSTRT/DDFSTOP,
+modulos, BPLCON1 scroll) inside the vertical display window and Denise draws them
+into `Video.pixels`, a 736×312 hires ARGB frame (column 0 = lowres position
+`$58`), with dual playfield, HAM and extra half-brite colours. Registers in
+effect at the end of a line apply to the whole line. Sprites, collisions,
+interlace and DMA slot contention are not implemented.
+
+`Blitter.swift` runs a blit as soon as BLTSIZE is written (with DMAEN and
+BLTEN): area mode with A/B/C/D channels, shifts, first/last-word masks, all 256
+minterms, descending mode, modulos, inclusive/exclusive fill with FCI, and line
+mode (octants, SING). BZERO is set and INTREQ BLIT raised on completion; BBUSY
+never reads 1. Line texture bit order is unverified.
+
+`FloppyDrive.swift` models an empty internal DF0 on the CIAs: CIA-B port B
+select, motor (latched on select), side, direction and step; CIA-A /RDY, /TK0,
+/WPRO and /CHNG (low: no disk). DF1–DF3 are not connected. No disk DMA or media.
 CPU registers remain unchanged on a thrown error, but earlier bus writes are
 not rolled back. Odd branch targets fail on the next fetch. Initial register
 values are deterministic host defaults, not hardware power-on guarantees.
@@ -125,7 +145,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 ## Tests
 
-Ninety-one tests cover the memory foundation and CPU subset. Coverage includes
+One hundred and four tests cover the memory foundation and CPU subset. Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
 encodings, and partial-write faults. Control-instruction tests cover every
@@ -149,7 +169,11 @@ LINK/UNLK/PEA/Scc/status moves, CMPM, ADDX/SUBX chains, TRAP/RTE and the
 exception vectors. Memory tests cover chip-RAM mirrors, slow RAM, the custom
 chip mirror, and the empty autoconfig window. Machine tests cover interrupt
 masking and stacking, STOP woken by VERTB with RTE, STOP privilege, CIA timer
-interrupts routed to INTREQ levels 2 and 6, and TOD driven by the beam.
+interrupts routed to INTREQ levels 2 and 6, and TOD driven by the beam. Video
+tests cover Copper MOVE/WAIT/SKIP, the danger bit, frame restart, lowres and
+hires placement, modulos and HAM. Blitter tests cover shifted/masked copies,
+three-source minterms with modulos, fill modes, BZERO, waiting for BLTEN and a
+line. A drive test covers selection, motor latch, stepping and status lines.
 Debug and release builds/tests passed on November 25, 2026.
 These tests establish the implemented contract, not Amiga software compatibility.
 
@@ -159,7 +183,7 @@ ROMs remain user-supplied and ignored by Git. From the repository root:
 
 ```sh
 swiftc -O Sources/MacMigaCore/*.swift Tools/KickstartProbe.swift -o /tmp/MacMiga-KickstartProbe
-/tmp/MacMiga-KickstartProbe [--limit N] "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+/tmp/MacMiga-KickstartProbe [--limit N] [--frames DIR] "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
 ```
 
 The probe stops at the first diagnostic or after `--limit` instructions
@@ -169,24 +193,27 @@ November 25, 2026 were each 524,288 bytes. Their measured startup results:
 
 | File | Reset PC | Result with `--limit 30000000` |
 | --- | --- | --- |
-| kickstart-1.3.rom | $00FC00D2 | no error; STOP at $00FC0F94, SR=$2000, 19.2 emulated s |
-| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | no error; STOP at $00F81476 at 5–10 emulated s, later a user-mode loop reading CIA-A timer B around $00FBCAD4 |
+| kickstart-1.3.rom | $00FC00D2 | no error; 42.2 emulated s; insert-disk screen drawn |
+| kickstart-3.1-a500_a600_a2000.rom | $00F800D2 | no error; 40.1 emulated s; insert-disk screen drawn |
 
-Both ROMs pass the delay loops, diagnostic slot, overlay switch-off, chip and
-slow RAM sizing, Gayle probe and autoconfig scan, enable interrupts (INTENA
-$602E: VERTB, PORTS, SOFT, DSKBLK, EXTER) and Copper/Blitter/disk DMA, then
-idle in STOP between interrupts. With no floppy, display or Blitter yet this is
-presumably the "insert disk" state, but nothing is drawn to confirm it.
+`--frames DIR` writes the last frame as `DIR/<rom name>.png`. Kickstart 1.3
+shows the white screen with the hand holding a "Workbench 1.3" disk (palette
+$FFF/$000/$77C/$BBB). Kickstart 3.1 shows the checkmark, a floppy disk and text
+on a $414 background; that colour is the first entry of the palette table the ROM
+loads with LoadRGB4 (read from ROM offset $427C8), not an emulator guess. Before
+DF0 reported "no disk", 1.3 waited forever for a disk read and never enabled
+bitplanes. These were checked by decoding the PNGs into text, not by comparison
+with real hardware.
 
 Neither ROM booted. The probe reports raw reset-vector values and does not
 validate ROM identity, checksum, or software compatibility.
 
 ## Next milestones
 
-1. Video: Copper, bitplane DMA and a Denise framebuffer, plus the Blitter, so
-   the Kickstart insert-disk screen can be seen.
+1. Floppy: ADF images, MFM disk DMA (DSKLEN/DSKSYNC/DSKBLK), disk change, so
+   Workbench disks boot; sprites for the mouse pointer.
 2. Remaining CPU pieces: ABCD/SBCD/NBCD, CHK, MOVEP, bus/address errors, timing.
-3. OCS custom chips: raster timing, DMA, bitplanes, Copper, Blitter, and audio.
+3. OCS custom chips: sprites, DMA slot timing, and audio.
 4. Disk-image loading and floppy controller, keyboard/mouse/joystick input.
 5. Native macOS display/audio interface and user-selected firmware/media.
 6. Verify boot and software compatibility using authorized firmware and media.
