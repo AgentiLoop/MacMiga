@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import GameController
+import MetalKit
 import MacMigaCore
 import UniformTypeIdentifiers
 
@@ -249,10 +250,69 @@ let amigaKeys: [UInt16: UInt8] = [
     56: 0x60, 60: 0x61, 57: 0x62, 59: 0x63, 58: 0x64, 61: 0x65, 55: 0x66, 54: 0x67,
 ]
 
-final class DisplayView: NSView {
+final class DisplayView: MTKView, MTKViewDelegate {
     var emulator: Emulator?
     /// Pixels of the frame on screen, kept to tell whether the next frame differs.
     private var shownPixels = Data()
+    /// Set when the picture must be drawn again although no new frame arrived (resize, crop).
+    private var needsRedraw = true
+
+    private let queue: MTLCommandQueue
+    private let pipeline: MTLRenderPipelineState
+    /// Three textures in rotation: a new frame is always copied into one the GPU isn't reading.
+    private var textures: [MTLTexture?] = [nil, nil, nil]
+    private var current = 0
+    /// Command buffers in flight, at most one fewer than the textures.
+    private let inFlight = DispatchSemaphore(value: 2)
+
+    private static let shaderSource = """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct VOut { float4 pos [[position]]; float2 uv; };
+    vertex VOut vmain(uint vid [[vertex_id]], constant float4 &rect [[buffer(0)]]) {
+        float2 t = float2(vid & 1, vid >> 1);
+        VOut o;
+        o.pos = float4(t.x * 2 - 1, 1 - t.y * 2, 0, 1);
+        o.uv = rect.xy + t * rect.zw;
+        return o;
+    }
+    fragment float4 fmain(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+        constexpr sampler s(filter::nearest, address::clamp_to_edge);
+        return float4(tex.sample(s, in.uv).rgb, 1);
+    }
+    """
+
+    override init(frame: NSRect, device: MTLDevice?) {
+        guard let device = device ?? MTLCreateSystemDefaultDevice(),
+              let queue = device.makeCommandQueue() else { fatalError("Metal is not available") }
+        self.queue = queue
+        do {
+            let library = try device.makeLibrary(source: DisplayView.shaderSource, options: nil)
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = library.makeFunction(name: "vmain")
+            desc.fragmentFunction = library.makeFunction(name: "fmain")
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            pipeline = try device.makeRenderPipelineState(descriptor: desc)
+        } catch {
+            fatalError("Metal pipeline: \(error)")
+        }
+        super.init(frame: frame, device: device)
+        colorPixelFormat = .bgra8Unorm
+        clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        framebufferOnly = true
+        // Driven by the display's refresh: each refresh calls onRefresh (which runs the emulation)
+        // and then presents the newest frame, so pictures change only on vsync. A refresh without
+        // a new frame draws nothing.
+        isPaused = false
+        enableSetNeedsDisplay = false
+        preferredFramesPerSecond = 120
+        delegate = self
+    }
+
+    convenience init(frame: NSRect) { self.init(frame: frame, device: nil) }
+
+    required init(coder: NSCoder) { fatalError() }
+
     private var left = false, right = false
     private var modifiersDown = Set<UInt16>()
 
@@ -309,17 +369,7 @@ final class DisplayView: NSView {
                                        owner: self))
     }
 
-    // The frame is the contents of the view's layer, which the window server scales with
-    // nearest-neighbour sampling; nothing is drawn through Core Graphics at window size.
-    override func makeBackingLayer() -> CALayer {
-        let layer = CALayer()
-        layer.backgroundColor = .black
-        layer.contentsGravity = .resize
-        layer.magnificationFilter = .nearest
-        layer.minificationFilter = .nearest
-        layerContentsRedrawPolicy = .never
-        return layer
-    }
+    // The frame is a Metal texture drawn as a textured quad with nearest-neighbour sampling.
 
     /// The whole frame is every beam line (0–311, vertical blank included) and lowres
     /// positions $58–$1C8. The standard display window ($2C81–$2CC1, 320×256) is not in its
@@ -335,8 +385,11 @@ final class DisplayView: NSView {
     }
     /// Part of the frame shown, in frame pixels (hires columns × beam lines).
     var visibleArea = DisplayView.fullArea {
-        didSet { shownPixels = Data() } // redraw the next frame even if it is unchanged
+        didSet { needsRedraw = true; needsDisplay = true }
     }
+
+    /// A frame received but not yet copied into a texture.
+    private var pendingUpload = false
 
     /// Shows the frame unless it is the one already on screen, which costs no redraw at all.
     func show(_ video: Video) {
@@ -347,17 +400,62 @@ final class DisplayView: NSView {
         }
         guard !unchanged else { return }
         shownPixels = video.pixels.withUnsafeBufferPointer { Data(buffer: $0) }
-        guard let provider = CGDataProvider(data: shownPixels as CFData) else { return }
-        // In the window's own colour space Core Animation takes the pixels as they are; any
-        // other space makes it convert every frame on the CPU.
-        let frame = CGImage(width: Video.width, height: Video.height, bitsPerComponent: 8, bitsPerPixel: 32,
-                        bytesPerRow: Video.width * 4,
-                        space: window?.colorSpace?.cgColorSpace ?? CGColorSpaceCreateDeviceRGB(),
-                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue
-                                                 | CGBitmapInfo.byteOrder32Little.rawValue),
-                        provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
-        layer?.contents = visibleArea == DisplayView.fullArea ? frame : frame?.cropping(to: visibleArea)
+        pendingUpload = true
+        needsDisplay = true
     }
+
+    /// Called at every display refresh, before the newest frame is presented.
+    var onRefresh: (() -> Void)?
+
+    func draw(in view: MTKView) {
+        onRefresh?()
+        // Both earlier pictures still on the GPU: try again at the next refresh instead of blocking.
+        guard inFlight.wait(timeout: .now()) == .success else { return }
+        var committed = false
+        defer { if !committed { inFlight.signal() } }
+        if pendingUpload, let device, shownPixels.count >= Video.width * Video.height * 4 {
+            pendingUpload = false
+            let next = (current + 1) % textures.count
+            if textures[next] == nil {
+                let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm,
+                                                                    width: Video.width, height: Video.height,
+                                                                    mipmapped: false)
+                desc.usage = .shaderRead
+                textures[next] = device.makeTexture(descriptor: desc)
+            }
+            shownPixels.withUnsafeBytes { bytes in
+                guard let base = bytes.baseAddress else { return }
+                textures[next]?.replace(region: MTLRegionMake2D(0, 0, Video.width, Video.height), mipmapLevel: 0,
+                                        withBytes: base, bytesPerRow: Video.width * 4)
+            }
+            current = next
+            needsRedraw = true
+        }
+        // Nothing new: leave the last presented picture on screen instead of drawing it again.
+        guard needsRedraw else { return }
+        needsRedraw = false
+        guard let pass = currentRenderPassDescriptor,
+              let drawable = currentDrawable,
+              let buffer = queue.makeCommandBuffer(),
+              let encoder = buffer.makeRenderCommandEncoder(descriptor: pass) else { return }
+        if let texture = textures[current] {
+            let r = visibleArea
+            var rect = SIMD4<Float>(Float(r.minX) / Float(texture.width), Float(r.minY) / Float(texture.height),
+                                    Float(r.width) / Float(texture.width), Float(r.height) / Float(texture.height))
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
+            encoder.setFragmentTexture(texture, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+        encoder.endEncoding()
+        buffer.present(drawable)
+        let done = inFlight
+        buffer.addCompletedHandler { _ in done.signal() }
+        buffer.commit()
+        committed = true
+    }
+
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) { needsRedraw = true }
 
     override func keyDown(with event: NSEvent) {
         if event.modifierFlags.contains(.command) { super.keyDown(with: event); return }
@@ -468,7 +566,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The Fast RAM submenu, whose check marks change when a WHDLoad disk turns fast RAM on.
     private var fastRAMMenu: NSMenu?
     let view = DisplayView(frame: NSRect(x: 0, y: 0, width: Video.width, height: Video.height * 2))
-    var timer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
@@ -520,14 +617,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let hdf = arguments.first(where: { $0.lowercased().hasSuffix(".hdf") }) {
             attach(hardDisk: URL(fileURLWithPath: hdf))
         }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 50.0, repeats: true) { _ in
-            MainActor.assumeIsolated { self.tick() }
+        // Paced by the display's refresh rather than a timer, so frames reach the screen on vsync.
+        view.onRefresh = { [weak self] in self?.refresh() }
+    }
+
+    /// When the next PAL frame (50 a second) is due, on the CACurrentMediaTime clock.
+    private var nextFrameTime = 0.0
+
+    /// Runs the PAL frames due by this display refresh. More than 0.1 s behind (or in warp,
+    /// which paces itself) the clock restarts instead of catching up.
+    private func refresh() {
+        let now = CACurrentMediaTime()
+        if emulator.warp || emulator.diskBusy() || now - nextFrameTime > 0.1 { nextFrameTime = now }
+        while now >= nextFrameTime {
+            nextFrameTime += 1.0 / 50.0
+            tick()
         }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) { emulator.saveHardDisk() }
+
+    /// Debug: with MACMIGA_DUMP=path every shown frame is appended to that file as raw 0xAARRGGBB pixels.
+    private let frameDump: FileHandle? = {
+        guard let path = ProcessInfo.processInfo.environment["MACMIGA_DUMP"] else { return nil }
+        FileManager.default.createFile(atPath: path, contents: nil)
+        return FileHandle(forWritingAtPath: path)
+    }()
+
+    /// Debug: one line per shown frame in /tmp/macmiga-trace.log (bitplane pointers, scroll, copper list).
+    private let traceLog: FileHandle? = {
+        FileManager.default.createFile(atPath: "/tmp/macmiga-trace.log", contents: nil)
+        return FileHandle(forWritingAtPath: "/tmp/macmiga-trace.log")
+    }()
 
     private func tick() {
         if emulator.warp || emulator.diskBusy() {
@@ -541,6 +664,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let video = emulator.machine?.memory.video {
             fitCrop(to: video.displayedLines)
             view.show(video)
+            if let frameDump { frameDump.write(video.pixels.withUnsafeBufferPointer { Data(buffer: $0) }) }
+            traceLog?.write(Data("\(video.frameCount) \(video.traceDisplayed)\n".utf8))
         }
         updateDriveLights()
     }

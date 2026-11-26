@@ -1,3 +1,4 @@
+import Foundation
 /// Copper co-processor state (Agnus). Runs only while DMACON DMAEN and COPEN are set.
 ///
 /// Each instruction takes 4 colour clocks. MOVE writes a custom register (below `$40` is
@@ -47,6 +48,9 @@ public struct Video: Equatable, Sendable {
     public internal(set) var displayedLines: ClosedRange<Int>?
     /// The same range for the frame being drawn.
     var displayingLines: ClosedRange<Int>?
+    /// Debug: bitplane pointers, scroll and copper list when the last completed frame first showed bitplanes.
+    public internal(set) var traceDisplayed = ""
+    var traceDisplaying = ""
 
     public init() {}
 
@@ -120,6 +124,8 @@ extension AmigaMemory {
                 video.frameCount += 1
                 video.displayedLines = video.displayingLines
                 video.displayingLines = nil
+                video.traceDisplayed = video.traceDisplaying
+                video.traceDisplaying = ""
                 copper.jump(to: custom.copperLocation(1))
                 for index in 0..<8 { custom.sprites[index].dma = .idle }
             }
@@ -298,6 +304,14 @@ extension AmigaMemory {
                 }
             }
             return
+        }
+        if video.displayingLines == nil {
+            typealias T = CustomChips.Register
+            video.traceDisplaying = String(format: "line=%d bpl=%06X,%06X,%06X bplcon1=%04X diw=%04X/%04X ddf=%04X/%04X mod=%04X cop1=%06X copPC=%06X",
+                                           line, custom.bitplanePointers[0], custom.bitplanePointers[1], custom.bitplanePointers[2],
+                                           custom.register(T.bplcon1), custom.register(T.diwstrt), custom.register(T.diwstop),
+                                           custom.register(T.ddfstrt), custom.register(T.ddfstop), custom.register(T.bpl1mod),
+                                           custom.copperLocation(1), copper.programCounter)
         }
         video.displayingLines = video.displayingLines.map { min($0.lowerBound, line)...line } ?? line...line
         let fetchStart = Int(custom.register(R.ddfstrt) & 0xFC)
