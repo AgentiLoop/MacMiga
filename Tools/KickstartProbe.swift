@@ -195,7 +195,7 @@ struct KickstartProbe {
             }
             let custom = machine.memory.custom
             print(String(format: "BPLCON0=$%04X DIW=$%04X-$%04X DDF=$%04X-$%04X", custom.register(0x100), custom.register(0x08E), custom.register(0x090), custom.register(0x092), custom.register(0x094)))
-            for (n, c) in [("A", machine.memory.ciaA), ("B", machine.memory.ciaB)] { print(String(format: "TMPCIA %@ TA=%04X LA=%04X CRA=%02X TB=%04X LB=%04X CRB=%02X ICR=%02X MASK=%02X", n, c.timerA, c.latchA, c.controlA, c.timerB, c.latchB, c.controlB, c.interruptData, c.interruptMask)) }
+            for (n, c) in [("A", machine.memory.ciaA), ("B", machine.memory.ciaB)] { print(String(format: "TMPCIA %@ PRA=%02X PRB=%02X TA=%04X LA=%04X CRA=%02X TB=%04X LB=%04X CRB=%02X ICR=%02X MASK=%02X", n, c.outputA, c.outputB, c.timerA, c.latchA, c.controlA, c.timerB, c.latchB, c.controlB, c.interruptData, c.interruptMask)) }
             print("COLOR00-07: " + (0..<8).map { String(format: "$%03X", custom.register(0x180 + $0 * 2)) }.joined(separator: " "))
             for line in systemReport(&machine.memory) { print(line) }
             if !custom.serialOutput.isEmpty {
