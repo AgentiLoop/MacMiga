@@ -56,6 +56,37 @@ private func customMemory() throws -> AmigaMemory {
     #expect(chips.interruptLevel == 6)
 }
 
+@Test func interruptLevelMatchesEveryPendingMask() {
+    let levels = [1, 1, 1, 2, 3, 3, 3, 4, 4, 4, 4, 5, 5, 6]
+    var chips = CustomChips()
+    chips.writeWord(offset: 0x9A, value: 0xFFFF)
+    for mask in UInt16(0)..<0x4000 {
+        chips.writeWord(offset: 0x9C, value: 0x3FFF)
+        chips.requestInterrupt(bits: mask)
+        var expected = 0
+        for bit in 0..<14 where mask & (UInt16(1) << bit) != 0 {
+            expected = max(expected, levels[bit])
+        }
+        #expect(chips.interruptLevel == expected)
+        chips.writeWord(offset: 0x9A, value: 0x4000)
+        #expect(chips.interruptLevel == 0)
+        chips.writeWord(offset: 0x9A, value: 0xC000)
+    }
+}
+
+@Test func interruptLevelIgnoresDisabledSources() {
+    let levels = [1, 1, 1, 2, 3, 3, 3, 4, 4, 4, 4, 5, 5, 6]
+    var chips = CustomChips()
+    chips.requestInterrupt(bits: 0x3FFF)
+    for bit in 0..<14 {
+        chips.writeWord(offset: 0x9A, value: 0x3FFF)
+        chips.writeWord(offset: 0x9A, value: 0xC000 | (UInt16(1) << bit))
+        #expect(chips.interruptLevel == levels[bit])
+    }
+    chips.writeWord(offset: 0x9A, value: 0x3FFF)
+    #expect(chips.interruptLevel == 0)
+}
+
 @Test func beamCounterWrapsAndRaisesVerticalBlank() throws {
     var memory = try customMemory()
     let first = memory.custom.advance(colorClocks: 227 * 2 + 5)
