@@ -20,13 +20,13 @@ private func moveMemory(_ words: [UInt16]) throws -> TestBus {
                     for extend: UInt16 in [0, 0x10] {
                         var cpu = MC68000()
                         cpu.programCounter = 0x100
-                        cpu.statusRegister = 0xA70F | extend
+                        cpu.statusRegister = 0x270F | extend
                         cpu[data: destination] = 0xA5A5_A5A5
                         cpu[data: source] = value
                         var expected = cpu
                         let result = value & mask
                         expected[data: destination] = (cpu[data: destination] & ~mask) | result
-                        expected.statusRegister = 0xA700 | extend | (result == 0 ? 4 : result & sign != 0 ? 8 : 0)
+                        expected.statusRegister = 0x2700 | extend | (result == 0 ? 4 : result & sign != 0 ? 8 : 0)
                         expected.programCounter = 0x102
                         try memory.writeWord(prefix | UInt16(destination << 9) | UInt16(source), at: 0x100)
                         try cpu.step(memory: &memory)
@@ -101,7 +101,7 @@ private func moveMemory(_ words: [UInt16]) throws -> TestBus {
                 try memory.writeWord(value, at: 0x102)
                 var cpu = MC68000()
                 cpu.programCounter = 0x100
-                cpu.statusRegister = supervisor | 0x801F
+                cpu.statusRegister = supervisor | 0x001F
                 var expected = cpu
                 expected[address: register] = UInt32(bitPattern: Int32(Int16(bitPattern: value)))
                 expected.programCounter = 0x104

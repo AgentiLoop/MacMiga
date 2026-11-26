@@ -58,12 +58,12 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
                 try memory.writeWord(0x7000 | UInt16(register << 9) | UInt16(immediate), at: 0x100)
                 var cpu = MC68000()
                 cpu.programCounter = 0x100
-                cpu.statusRegister = 0xA700 | extend | 0x0F
+                cpu.statusRegister = 0x2700 | extend | 0x0F
                 for index in 0..<8 { cpu[data: index] = 0xDEAD_BEEF }
                 try cpu.step(memory: &memory)
                 let expected = UInt32(bitPattern: Int32(Int8(bitPattern: UInt8(immediate))))
                 #expect(cpu[data: register] == expected)
-                #expect(cpu.statusRegister == 0xA700 | extend | (immediate == 0 ? 4 : immediate >= 128 ? 8 : 0))
+                #expect(cpu.statusRegister == 0x2700 | extend | (immediate == 0 ? 4 : immediate >= 128 ? 8 : 0))
                 #expect(cpu.programCounter == 0x102)
                 for index in 0..<8 where index != register {
                     #expect(cpu[data: index] == 0xDEAD_BEEF)
@@ -77,7 +77,7 @@ private func cpuMemory(_ words: [UInt16], at address: UInt32 = 0x100) throws -> 
     var memory = try cpuMemory([0x4E71])
     var cpu = MC68000()
     cpu.programCounter = 0x100
-    cpu.statusRegister = 0xA71F
+    cpu.statusRegister = 0x271F
     cpu[data: 2] = 123
     cpu[address: 5] = 456
     var expected = cpu

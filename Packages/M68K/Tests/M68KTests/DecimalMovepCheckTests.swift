@@ -118,7 +118,8 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
 
 @Test func oddOpcodeFetchTakesAddressError() throws {
     // BRA.S *+1 fetches from an odd address before it ends: a supervisor program-space read
-    // fault with the branch still in the instruction register.
+    // fault with the branch still in the instruction register. A branch stacks its own address
+    // + 2 as PC (Rob Northen's Copylock depends on it).
     let (cpu, memory) = try run([0x60FF]) { _, memory in
         try memory.writeLong(0x3000, at: 3 * 4)
     }
@@ -128,7 +129,7 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
     #expect(try m.readWord(at: 0x7FF2) == 0x60F6)   // read, supervisor program space
     #expect(try m.readLong(at: 0x7FF4) == 0x101)
     #expect(try m.readWord(at: 0x7FF8) == 0x60FF)   // instruction register
-    #expect(try m.readLong(at: 0x7FFC) == 0x101)
+    #expect(try m.readLong(at: 0x7FFC) == 0x102)
 }
 
 @Test func jsrToAnOddAddressFaultsBeforeItPushes() throws {
@@ -187,6 +188,7 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
             cpu[data: Int(opcode & 7)] = bound
             cpu[data: Int((opcode >> 9) & 7)] = value
             cpu.statusRegister = status
+            cpu.stopsBeforeTrace = true // the sets end before the trace exception
         }
         #expect(cpu.programCounter == 0x102)
         #expect(cpu.statusRegister == statusAfter)
@@ -205,6 +207,7 @@ private func run(_ words: [UInt16], steps: Int = 1, setup: (inout MC68000, inout
             cpu[data: Int(opcode & 7)] = divisor
             cpu[data: Int((opcode >> 9) & 7)] = dividend
             cpu.statusRegister = status
+            cpu.stopsBeforeTrace = true // the sets end before the trace exception
         }
         #expect(cpu[data: Int((opcode >> 9) & 7)] == dividend)
         #expect(cpu.statusRegister == statusAfter)

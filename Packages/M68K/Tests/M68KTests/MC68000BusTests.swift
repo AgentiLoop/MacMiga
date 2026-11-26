@@ -212,6 +212,60 @@ private struct OverlayBus: M68KBus {
     #expect(cpu.programCounter == 0x3100)
 }
 
+@Test func traceFollowsEachInstructionStartedWithTheTBit() throws {
+    var (cpu, memory) = try start([
+        0x007C, 0x8000, // $400 ori #$8000,sr: T is set by this one, so it is not traced
+        0x7001,         // $404 moveq #1,d0: traced
+        0x4AFC          // $406 illegal: no trace after it
+    ])
+    try memory.writeLong(0x600, at: 9 * 4)  // trace
+    try memory.writeLong(0x700, at: 4 * 4)  // illegal instruction
+    try memory.writeWord(0x4E73, at: 0x600) // rte
+    try cpu.step(memory: &memory)
+    #expect(cpu.programCounter == 0x404)
+    #expect(cpu.statusRegister == 0xA700)
+    let clocks = try cpu.step(memory: &memory)
+    #expect(cpu[data: 0] == 1)
+    #expect(cpu.programCounter == 0x600)
+    #expect(cpu.statusRegister == 0x2700)                 // T cleared in the handler
+    #expect(try memory.readWord(at: 0x7FFA) == 0xA700)  // stacked SR still has T
+    #expect(try memory.readLong(at: 0x7FFC) == 0x406)   // the next instruction
+    #expect(clocks == 4 + 34)
+    try cpu.step(memory: &memory)                         // rte, back with T set
+    #expect(cpu.programCounter == 0x406 && cpu.statusRegister == 0xA700)
+    try cpu.step(memory: &memory)
+    #expect(cpu.programCounter == 0x700)
+    #expect(try memory.readLong(at: 0x7FFC) == 0x406)   // the illegal opcode's own address
+
+    cpu = MC68000()
+    try cpu.reset(memory: &memory)
+    cpu.statusRegister = 0xA700
+    cpu.stopsBeforeTrace = true
+    cpu.programCounter = 0x404
+    try cpu.step(memory: &memory)
+    #expect(cpu.programCounter == 0x406)
+}
+
+@Test func traceFollowsATrapAndEndsStop() throws {
+    var (cpu, memory) = try start([0x4E41, 0x4E72, 0xA700]) // trap #1 ; stop #$A700
+    try memory.writeLong(0x600, at: 9 * 4)
+    try memory.writeLong(0x800, at: 33 * 4)
+    cpu.statusRegister = 0xA700
+    try cpu.step(memory: &memory)
+    #expect(cpu.programCounter == 0x600)                 // trace after the trap…
+    #expect(try memory.readLong(at: 0x7FF6) == 0x800)   // …stacking the trap handler's address
+    #expect(try memory.readLong(at: 0x7FFC) == 0x402)   // the trap's own frame
+
+    cpu = MC68000()
+    try cpu.reset(memory: &memory)
+    cpu.statusRegister = 0xA700
+    cpu.programCounter = 0x402
+    try cpu.step(memory: &memory)
+    #expect(!cpu.isStopped)
+    #expect(cpu.programCounter == 0x600)
+    #expect(try memory.readLong(at: 0x7FFC) == 0x406)
+}
+
 @Test func resetOnABusWithoutDevicesOnlyMovesOn() throws {
     var (cpu, memory) = try start([0x4E70, 0x7001])        // reset ; moveq #1,d0
     try cpu.step(memory: &memory)

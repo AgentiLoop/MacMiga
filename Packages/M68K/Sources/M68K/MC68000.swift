@@ -69,6 +69,10 @@ public struct MC68000: Equatable, Sendable {
     /// error exception (vector 3, 14-byte group 0 frame). When true, `step` throws
     /// `CPUError.addressError` instead. Either way the bus never sees the access.
     public var stopsOnAddressError = false
+    /// When false (hardware behaviour), an instruction started with SR's T bit set is followed
+    /// by the trace exception. When true, `step` ends with the instruction, as the
+    /// SingleStepTests sets record it.
+    public var stopsBeforeTrace = false
 
     /// Deterministic host initialization, not a claim about hardware power-on register values.
     @inlinable public init() {}
@@ -121,13 +125,18 @@ public struct MC68000: Equatable, Sendable {
     /// Errors are host diagnostics, not hardware exception processing.
     /// Group 1/2 exceptions (TRAP, privilege violation, divide by zero, illegal, line A/F)
     /// are processed by pushing PC and SR on the supervisor stack and jumping through the
-    /// vector table. Bus errors and trace are not modelled; see `interrupt(level:memory:)`.
+    /// vector table. Bus errors are not modelled; see `interrupt(level:memory:)`.
+    /// Trace: when SR's T bit is set as an instruction starts, the trace exception (vector 9)
+    /// follows it, with the next instruction's address stacked. It also follows TRAP, TRAPV,
+    /// CHK and a division by zero (stacking their handler's address), and ends STOP; it does
+    /// not follow an illegal instruction, line A/F, a privilege violation or an address error.
     @discardableResult
     @inlinable public mutating func step<Bus: M68KBus>(memory: inout Bus) throws -> Int {
         guard !isStopped else { return 0 }
         let prefetched = prefetchedOpcode
         prefetchedOpcode = nil
         let instructionAddress = programCounter
+        var traced = status & 0x8000 != 0 && !stopsBeforeTrace
         do {
             do {
                 try execute(prefetched: prefetched, memory: &memory)
@@ -135,8 +144,12 @@ public struct MC68000: Equatable, Sendable {
                 // at the target before the instruction ends, with the jump still in IR.
                 if programCounter & 1 != 0, instructionAddress & 1 == 0, !stopsOnAddressError {
                     let opcode = try prefetched ?? memory.readAlignedWord(at: instructionAddress)
-                    try enterAddressError(accessAddress: programCounter, write: false, instruction: opcode, memory: &memory)
+                    // A branch (Bcc, BRA, BSR) stacks its own address + 2 instead of the target;
+                    // Rob Northen's Copylock sums its code up to that address.
+                    try enterAddressError(accessAddress: programCounter, write: false, instruction: opcode,
+                                          stackedPC: opcode & 0xF000 == 0x6000 ? instructionAddress &+ 2 : nil, memory: &memory)
                     clocks += 50
+                    traced = false
                 }
             } catch let trap as Trap {
                 if let registers = trap.registers { self = registers }
@@ -145,12 +158,21 @@ public struct MC68000: Equatable, Sendable {
                 // CHK 40, division by zero 38, the others (illegal, privilege, TRAP, TRAPV,
                 // line A and F) 34; `registers` brought the operand's time with them.
                 clocks += trap.vector == 6 ? 40 : trap.vector == 5 ? 38 : 34
+                traced = traced && (5...7 ~= trap.vector || 32...47 ~= trap.vector)
             } catch CPUError.unsupportedInstruction(_, let address) where !stopsOnIllegalInstruction {
                 try enterException(vector: 4, returnAddress: address, memory: &memory)
                 clocks += 34
+                traced = false
             } catch CPUError.addressError(let address, let isWrite) where !stopsOnAddressError {
                 try enterAddressError(accessAddress: address, write: isWrite, memory: &memory)
                 clocks += 50
+                traced = false
+            }
+            if traced {
+                stopped = false
+                prefetchedOpcode = nil
+                try enterException(vector: 9, returnAddress: programCounter, memory: &memory)
+                clocks += 34
             }
         } catch {
             clocks = 0
@@ -169,9 +191,11 @@ public struct MC68000: Equatable, Sendable {
     /// that no instruction led to, the instruction register is stacked as 0. The stacked PC is
     /// the faulting address for an odd opcode fetch, else the instruction address + 2 (real
     /// hardware stacks a value 2–10 bytes past it). A fault while writing this frame (odd SSP)
-    /// would halt a real 68000; here `CPUError.addressError` is thrown.
+    /// would halt a real 68000; here `CPUError.addressError` is thrown. `stackedPC`, if given,
+    /// replaces the stacked PC.
     @inlinable mutating func enterAddressError<Bus: M68KBus>(accessAddress: UInt32, write: Bool,
-                                            instruction: UInt16? = nil, memory: inout Bus) throws {
+                                            instruction: UInt16? = nil, stackedPC: UInt32? = nil,
+                                            memory: inout Bus) throws {
         let fetch = !write && accessAddress == programCounter
         let opcode = try instruction ?? (fetch ? 0 : memory.readAlignedWord(at: programCounter))
         let supervisor: UInt16 = status & 0x2000 != 0 ? 4 : 0
@@ -179,7 +203,7 @@ public struct MC68000: Equatable, Sendable {
         var next = self
         next.status = (status | 0x2000) & 0x7FFF
         let stackPointer = next.supervisorStackPointer &- 14
-        try memory.writeAlignedLong(fetch ? programCounter : programCounter &+ 2, at: stackPointer &+ 10)
+        try memory.writeAlignedLong(stackedPC ?? (fetch ? programCounter : programCounter &+ 2), at: stackPointer &+ 10)
         try memory.writeAlignedWord(status, at: stackPointer &+ 8)
         try memory.writeAlignedWord(opcode, at: stackPointer &+ 6)
         try memory.writeAlignedLong(accessAddress, at: stackPointer &+ 2)

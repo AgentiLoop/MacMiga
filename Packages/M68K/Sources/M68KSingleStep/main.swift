@@ -214,6 +214,7 @@ func run(_ url: URL, show: Int, showFrames: Bool, showClocks: Bool, only: String
         memory.written.removeAll(keepingCapacity: true)
 
         var cpu = MC68000()
+        cpu.stopsBeforeTrace = true
         cpu.statusRegister = initial.sr
         for index in 0..<8 { cpu[data: index] = initial.registers[index] }
         for index in 0..<7 { cpu[address: index] = initial.registers[8 + index] }
