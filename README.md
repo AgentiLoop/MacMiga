@@ -136,9 +136,9 @@ skipped during those stretches, as with Warp Speed.
 
 With no arguments it reuses the last ROM, or `Kickstart ROMs/kickstart-1.3.rom`
 in the current folder, or asks for one. The Machine menu opens a Kickstart ROM
-(⌘K), inserts (⌘O) or ejects (⌘E) a DF0 ADF, and resets (⌘R). Files can also be
+(⌘K), inserts (⌘O) or ejects (⌘E) a DF0 ADF or DMS image, and resets (⌘R). Files can also be
 dropped on the window: a `.rom` or `.bin` is opened as the Kickstart (and
-remembered, as from the menu), an `.adf` goes into DF0 and an `.hdf` is attached
+remembered, as from the menu), an `.adf` or `.dms` goes into DF0 and an `.hdf` is attached
 as DH0. The window shows
 the full 736×312 frame doubled vertically, emulating one frame per 1/50 s timer
 tick on the main thread. Keys map by US-layout position to Amiga raw codes
@@ -1119,7 +1119,7 @@ JOY1DAT and /FIR1. JOYTEST writes are honoured.
 `FloppyDrive.swift` models the internal DF0 on the CIAs: CIA-B port B select,
 motor (latched on select), side, direction and step; CIA-A /RDY, /TK0, /WPRO and
 /CHNG. `AmigaMemory.insertDisk(adf:)` inserts a 901,120-byte ADF image (always
-write-protected); /CHNG stays low after power-on or eject until a step pulse
+write-protected), or a DMS archive, which `DMS.swift` unpacks into one first; /CHNG stays low after power-on or eject until a step pulse
 with a disk present. The track under the head is encoded as standard AmigaDOS
 MFM (11 sectors with sync `$4489`, header/data checksums, odd/even split, gap;
 6,334 words). Disk DMA starts on the second DSKLEN write with DMAEN while DSKEN
@@ -1134,6 +1134,16 @@ after the start of the game. It now loads the game (checked with the probe: the
 Magnetic Fields title and the game's results screen, read by OCR). Disk writes
 are discarded. DF1–DF3, index pulses, drive ID, and non-DOS (custom MFM) disk
 formats are not implemented.
+
+`DMS.swift` (`DMS.unpack`) reads DMS (Disk Masher System) archives, the format
+most demos and many games were spread in. It is a port of xDMS 1.3 (public
+domain) and covers every mode: stored, run-length, quick, medium, deep and heavy
+1 and 2. Each cylinder record's header CRC, data CRC and unpacked checksum are
+checked; encrypted archives are refused, and cylinders an archive lacks (a demo
+split over two archives) read as zeros. Checked on November 26, 2026 against
+the xDMS program built from source: 13 archives from ftp.funet.fi and the
+Spaceballs site (heavy 1, heavy 2, deep, stored and run-length records; no
+quick or medium archive was found) unpacked to the same bytes.
 CPU registers remain unchanged on a thrown error, but earlier bus writes are
 not rolled back. Odd branch targets fail on the next fetch. Initial register
 values are deterministic host defaults, not hardware power-on guarantees.
@@ -1233,7 +1243,7 @@ These tests establish the implemented contract, not Amiga software compatibility
 ROMs remain user-supplied and ignored by Git. From the repository root:
 
 ```sh
-swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--ext EXTENDED.rom] [--fast MiB] [--chip 512|1024|2048] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
+swift run -c release KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf|DISK.dms] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--ext EXTENDED.rom] [--fast MiB] [--chip 512|1024|2048] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... "Kickstart ROMs/kickstart-1.3.rom" "Kickstart ROMs/kickstart-3.1-a500_a600_a2000.rom"
 ```
 
 `--hdf` attaches a hardfile as DH0 (the file itself is never modified;
@@ -1296,6 +1306,24 @@ trackdisk.device seeked, read and decoded a sector through disk DMA.
 Neither ROM has booted a real Workbench disk (AROS has been booted; see "AROS"). The probe reports raw
 reset-vector values and does not validate ROM identity, checksum, or software
 compatibility.
+
+## Compatibility targets
+
+Four software layers serve as benchmarks. What was run on November 26, 2026
+with the probe (images are not in the repository):
+
+| Target | Result |
+| --- | --- |
+| Kickstart 1.3 + Workbench 1.3 | Not tried: no Workbench 1.3 disk was at hand. A Fred Fish disk 1 image labelled `[WB]` stays on the insert-disk screen; its boot block holds no boot code (it reads `DOS\0`, `DOS\1`, `DOS\2`…). |
+| Kickstart 3.1 + Workbench 3.1 (workbench disk) | Boots to the Workbench screen: after 100,000,000 instructions (67.7 emulated s) DOS lists the volumes "Ram Disk" and "Workbench3.1", the display is hires with two planes and Workbench's default colours ($AAA, $000, $FFF, $68B), and the CPU waits in exec's idle loop. |
+| State of the Art (Spaceballs), the group's own `spb-sota.dms` | Needs 1 MB chip RAM. With `--chip 1024` under Kickstart 1.3 it ran 250,000,000 instructions (419 emulated s, 20,998 frames) without a bus/address error or other exception, and the snapshots at frames 1000, 2000, 3000, 5000, 8000 and 10000 show different scenes. With 512 KB chip it crashes at frame 252: its loader decodes a track upwards from $7DE44 past $80000, which on a 512 KB machine is chip RAM's mirror of $0, so the exception vectors are overwritten. The `-512k` version (ftp.funet.fi) ran the same length with 512 KB chip and no exception. |
+| Jesus on E's (LSD), ftp.funet.fi `LSD.JesusOnEs-1.dms` and `-2.dms` | Not working through. Disk 1 boots; at about frame 3000 its loader looks for the disk whose boot block has `JoE2` at byte 14, in DF0 and then DF1–DF3 (waiting for /RDY on each), and asks for `JoE1` once `JoE2` is found. Swapping disks in DF0 with `--insert` was accepted each time, but the screen had not changed by frame 18,000. The demo searches DF1–DF3 for the other disk, and those drives are not emulated. |
+| Turrican II (disk 1, licensed image) | Under Kickstart 1.3, 400,000,000 instructions (38,651 frames) with fire pressed at frames 9000, 9600 and 10200 raised no exception from frame 8500, where the check began; the display used five lowres planes with an early data fetch (DDFSTRT $28). Whether the pictures are right was not judged: the frames were only reduced to text. |
+| Shadow of the Beast | Not tried: no image at hand. |
+| WHDLoad on Kickstart 3.1 + HDF | Pac-Man, as in "WHDLoad"; no further installs were tried. |
+
+`--exceptions` and `--watch` used to skip the scripted input and the
+snapshots; since November 26, 2026 they no longer do.
 
 ## Next milestones
 
