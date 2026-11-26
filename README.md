@@ -1,8 +1,15 @@
 # MacMiga
 
 A Commodore Amiga 500 emulator for macOS, written in Swift. MacMiga is open
-source under the [MIT License](LICENSE) and a work in progress. There is no
-release to download yet: build it from source, see "Build from source" below.
+source under the [MIT License](LICENSE) and a work in progress.
+
+**[Website](https://macmiga.xcf.ai) · [Download 0.0.1](https://github.com/AgentiLoop/MacMiga/releases/tag/v0.0.1) · [Sister project: C64 / C128](https://c64.xcf.ai)**
+
+The 0.0.1 download is a Universal app for Apple silicon and Intel Macs running
+macOS 13 or newer, signed with Developer ID, notarized by Apple, and stapled.
+Unzip it, move MacMiga.app to Applications, then supply your own Kickstart ROM
+and disk images. No ROMs, operating systems, or games are included.
+Compatibility is still evolving; this is the first public release.
 
 <table>
   <tr>
@@ -77,9 +84,20 @@ local package `Packages/M68K`). The build puts three programs in
 (see "Making a hard disk") and `KickstartProbe` (see "Local Kickstart startup
 probe").
 
-`Bundle/make-app.sh` makes a release build and wraps it in
+`Bundle/make-app.sh` builds a Universal (Apple silicon + Intel) app at
 `.build/MacMiga.app`, with the icon drawn by `Bundle/MakeIcon.swift` and the
-`Info.plist` from `Bundle/`. The app is signed ad hoc.
+`Info.plist` from `Bundle/`. It uses a Developer ID Application identity when
+available, otherwise ad-hoc signing for local builds.
+
+`Bundle/make-app.sh --release` requires Developer ID signing, enables the
+hardened runtime, submits the archive to Apple, staples and validates the ticket,
+and checks Gatekeeper before creating `.build/MacMiga-0.0.1-universal.zip`
+and `.build/SHA256SUMS.txt`. The default notary keychain profile is
+`App Store Connect Profile`; override it with `NOTARY_PROFILE`, or choose a
+signing identity with `SIGN_ID`.
+
+Sister project: [C64 / C128 for macOS](https://c64.xcf.ai), with
+[source on GitHub](https://github.com/AgentiLoop/c64).
 
 ## Run the app
 
@@ -118,7 +136,10 @@ skipped during those stretches, as with Warp Speed.
 
 With no arguments it reuses the last ROM, or `Kickstart ROMs/kickstart-1.3.rom`
 in the current folder, or asks for one. The Machine menu opens a Kickstart ROM
-(⌘K), inserts (⌘O) or ejects (⌘E) a DF0 ADF, and resets (⌘R). The window shows
+(⌘K), inserts (⌘O) or ejects (⌘E) a DF0 ADF, and resets (⌘R). Files can also be
+dropped on the window: a `.rom` or `.bin` is opened as the Kickstart (and
+remembered, as from the menu), an `.adf` goes into DF0 and an `.hdf` is attached
+as DH0. The window shows
 the full 736×312 frame doubled vertically, emulating one frame per 1/50 s timer
 tick on the main thread. Keys map by US-layout position to Amiga raw codes
 (Command → Amiga keys, Option → Alt, Page Up/Help → Help); Command-key shortcuts
@@ -390,18 +411,20 @@ are listed above). What is not modelled: where inside an instruction each bus
 cycle falls, the time of an address error beyond the flat 50 clocks, and wait
 states, which belong to the machine.
 
-The package carries its own tests, 87 of them, and they use no Amiga code. The
+The package carries its own tests, 89 of them, and they use no Amiga code. The
 instruction-level tests were moved here from the MacMiga test target. Their
 checks are unchanged except in two places: the error for an address with
 nothing behind it is now the test bus's own, and the reset test puts its
 vectors in RAM instead of reading them through the Amiga's ROM overlay (the
 MacMiga target has a test for that). They run on `TestBus`, a memory map
 made for them: 2 MiB of RAM at `$000000`, 256 KiB of read-only ROM at
-`$FC0000`, and a hole in between where every access throws. Seven more tests
+`$FC0000`, and a hole in between where every access throws. Nine more tests
 run on a 64 KiB RAM bus (reset, a program with a loop and a subroutine, STOP
-ended by an interrupt, the address-error frame, illegal and TRAP vectors, and
-the RESET instruction: the device reset, the kept prefetch, privilege, and an
-interrupt discarding the prefetch). Seven tests check the time of about 125
+ended by an interrupt, the address-error frame, illegal and TRAP vectors, the
+RESET instruction: the device reset, the kept prefetch, privilege, and an
+interrupt discarding the prefetch, and trace: after an ordinary instruction,
+not after the one that sets T or an illegal instruction, after TRAP, and
+ending STOP). Seven tests check the time of about 125
 instructions.
 What the MacMiga target still tests of the CPU is its use in the machine:
 interrupts, STOP, and power-on and reset through the ROM overlay.
@@ -452,15 +475,27 @@ above the SR mask: SR and PC are stacked, the mask is raised and STOP ends.
 Level 7 is treated as level-sensitive (real hardware: edge-triggered).
 
 Each instruction is executed in one step and its time is returned (see
-"Instruction timing"); the bus cycles inside it are not placed in time. Prefetch
-and trace are absent. A word or long access to an odd address takes the address-error
+"Instruction timing"); the bus cycles inside it are not placed in time. The
+prefetch is absent. Trace: an instruction that starts with SR's T bit set is
+followed by the trace exception (vector 9, 34 clocks, the next instruction's
+address stacked); it also follows TRAP, TRAPV, CHK and a division by zero, and
+ends STOP, but not an illegal instruction, line A/F, a privilege violation or an
+address error. `cpu.stopsBeforeTrace = true` leaves it out, as the single-step
+test sets record their results. A word or long access to an odd address takes the address-error
 exception: vector 3 with the 14-byte group 0 frame (access type and function
 code, with the opcode's upper 11 bits above them; all 32 bits of the access
 address; opcode; SR; PC). A jump, branch or return to an odd address takes it
 in the same step, as the 68000 fetches from the target before the instruction
-ends; JSR pushes no return address in that case. The stacked PC is the odd
-address for a fetch fault, otherwise the instruction address + 2 (hardware
-stacks 2–10 bytes past it). A fault while
+ends; JSR pushes no return address in that case. The stacked PC is the branch's
+address + 2 for Bcc, BRA and BSR, the odd address for other fetch faults,
+otherwise the instruction address + 2 (hardware
+stacks 2–10 bytes past it). Both were needed by a cracked ADF of Super Cars
+(1990), which still runs Rob Northen's Copylock code: it decrypts itself one
+instruction at a time from the trace handler, then branches to an odd address
+on purpose and adds up its own code as far as the stacked PC to find where to
+go on. Without trace Kickstart 1.3 showed "Guru Meditation #00000003.00C05128";
+on November 25, 2026 the probe ran it past the Copylock code into the game's own
+code in chip RAM, with its display on. A fault while
 writing that frame stops emulation instead of halting the CPU. Setting
 `cpu.stopsOnAddressError = true` throws `CPUError.addressError` instead, as
 the fault-preservation tests do. Unmapped addresses still stop
@@ -474,7 +509,8 @@ each instruction Paula's interrupt level is presented to the CPU. Each instructi
 takes the CPU clocks the 68000 core returns for it (see "Instruction timing"),
 an accepted interrupt 44 more, and an idle step while stopped 4. The chipset
 is advanced once per instruction, not per bus cycle, and takes no bus time
-from the CPU: the blitter and disk DMA finish at once and bitplane DMA slows
+from the CPU: the blitter and the copying of disk DMA finish at once (DSKBLK
+follows later, see "Video, Copper and Blitter") and bitplane DMA slows
 nothing down. Until November 25, 2026 every instruction was counted as 10
 clocks. In three probe runs of 60,000,000 instructions the average is now 11.1
 (Kickstart 1.3 loading and running a game), 12.9 and 13.3 clocks (Kickstart 1.3
@@ -1087,10 +1123,17 @@ write-protected); /CHNG stays low after power-on or eject until a step pulse
 with a disk present. The track under the head is encoded as standard AmigaDOS
 MFM (11 sectors with sync `$4489`, header/data checksums, odd/even split, gap;
 6,334 words). Disk DMA starts on the second DSKLEN write with DMAEN while DSKEN
-is on and completes at once: with ADKCON WORDSYNC it waits for DSKSYNC in the
-rotating track (raising DSKSYN), then copies the following words; completion
-raises DSKBLK. Disk writes are discarded. DF1–DF3, index pulses, drive ID,
-bit-rate timing, and non-DOS (custom MFM) disk formats are not implemented.
+is on: with ADKCON WORDSYNC it waits for DSKSYNC in the rotating track (raising
+DSKSYN), then copies the following words. The words are in memory at once, but
+DSKBLK is raised only after the time the head needs to pass over them, 114 colour
+clocks (32 µs) a word counted from the start of the wait for the sync; a DSKLEN
+write without DMAEN cancels it. Until November 25, 2026 DSKBLK came at once, and
+the trackloader of Super Cars (1990), which clears DSKBLK just after starting a
+read and then waits for it, waited for ever: the screen flashed blue and black
+after the start of the game. It now loads the game (checked with the probe: the
+Magnetic Fields title and the game's results screen, read by OCR). Disk writes
+are discarded. DF1–DF3, index pulses, drive ID, and non-DOS (custom MFM) disk
+formats are not implemented.
 CPU registers remain unchanged on a thrown error, but earlier bus writes are
 not rolled back. Odd branch targets fail on the next fetch. Initial register
 values are deterministic host defaults, not hardware power-on guarantees.
@@ -1101,7 +1144,7 @@ writes; the memory bus currently performs longword writes high-word first.
 
 The tests are in two places. `swift test` runs the 101 tests of the Amiga
 machine in `Tests/MacMigaCoreTests`. `swift test --package-path Packages/M68K`
-runs the 87 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
+runs the 89 tests of the CPU (the MOVE, control, arithmetic, compare, MOVEQ,
 branch, logic/shift, decimal/MOVEP/CHK and timing tests described below). Coverage includes
 MOVE sizes, flags, partial-register writes, all supported addressing modes,
 MOVEA sign extension, stack-byte stride, shared-register ordering, invalid
@@ -1262,7 +1305,7 @@ compatibility.
 2. WHDLoad: try more installs and fix what breaks. Hard disk: try an image
    partitioned on an Amiga (MakeHardfile `--rdb` writes tables), and the 1.3 Fast
    File System from a partition table (needs Workbench 1.3's `L:FastFileSystem`).
-3. CPU package: address-error details and trace mode; then a 68020 (SFS and
+3. CPU package: address-error details; then a 68020 (SFS and
    other 68020-only software need it); later a 68030/68040 with MMU and FPU for
    NeXT.
 4. Boot a real Workbench disk in the app (needs a user-supplied ADF) and fix

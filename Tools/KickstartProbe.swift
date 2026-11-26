@@ -26,6 +26,7 @@ struct KickstartProbe {
         var clicks: [Int] = []
         var rightHolds: [(frame: Int, frames: Int)] = []
         var snapshots: [Int] = []
+        var inserts: [(frame: Int, path: String)] = []
         while paths.count >= 2, paths[0].hasPrefix("--") {
             if paths[0] == "--limit", let value = Int(paths[1]), value > 0 { limit = value }
             else if paths[0] == "--frames" { frameDirectory = paths[1] }
@@ -45,11 +46,14 @@ struct KickstartProbe {
             else if paths[0] == "--click", let frame = Int(paths[1]) { clicks.append(frame) }
             else if paths[0] == "--right", let numbers = Self.numbers(paths[1], count: 2) { rightHolds.append((numbers[0], numbers[1])) }
             else if paths[0] == "--snapshot", let frame = Int(paths[1]) { snapshots.append(frame) }
+            else if paths[0] == "--insert", let colon = paths[1].firstIndex(of: ":"), let frame = Int(paths[1][..<colon]) {
+                inserts.append((frame, String(paths[1][paths[1].index(after: colon)...])))
+            }
             else { break }
             paths.removeFirst(2)
         }
         guard !paths.isEmpty else {
-            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--ext EXTENDED.rom] [--fast MiB] [--chip 512|1024|2048] [--trace N] [--wild N] [--exceptions FRAME] [--watch FRAME:HEXADDRESS] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... <raw ROM path> [<raw ROM path> ...]")
+            print("Usage: KickstartProbe [--limit N] [--frames DIR] [--adf DISK.adf] [--hdf DISK.hdf] [--hdf-out COPY.hdf] [--ext EXTENDED.rom] [--fast MiB] [--chip 512|1024|2048] [--trace N] [--wild N] [--exceptions FRAME] [--watch FRAME:HEXADDRESS] [--key FRAME:HEXCODE]... [--fire FRAME]... [--mouse FRAME:DX:DY]... [--click FRAME]... [--right FRAME:FRAMES]... [--snapshot FRAME]... [--insert FRAME:DISK.adf]... <raw ROM path> [<raw ROM path> ...]")
             return
         }
         for path in paths {
@@ -154,6 +158,10 @@ struct KickstartProbe {
                     for press in presses {
                         if press.frame == frame { machine.key(press.key, pressed: true) }
                         if press.frame + 5 == frame { machine.key(press.key, pressed: false) }
+                    }
+                    for insert in inserts where insert.frame == frame { // a disk swap in DF0
+                        try machine.memory.insertDisk(adf: Array(try Data(contentsOf: URL(fileURLWithPath: insert.path))))
+                        print("Frame \(frame): DF0: \(URL(fileURLWithPath: insert.path).lastPathComponent)")
                     }
                     if fires.contains(frame) { machine.joystick(Joystick(), fire: true) }
                     if fires.contains(frame - 10) { machine.joystick(Joystick(), fire: false) }

@@ -323,11 +323,16 @@ final class DisplayView: NSView {
 
     /// The whole frame is every beam line (0–311, vertical blank included) and lowres
     /// positions $58–$1C8. The standard display window ($2C81–$2CC1, 320×256) is not in its
-    /// middle, so the borders are uneven. The cropped area is centred on that window: lowres
-    /// $7A–$1C8 (the frame's right edge, where the beam ends) and lines 32–311.
+    /// middle, so the borders are uneven. The cropped area runs from lowres $7A to $1C8 (the
+    /// frame's right edge, where the beam ends) and fits the lines the game shows bitplanes on
+    /// (lines 44–299 for the standard window), with a few lines of border above and below.
     static let fullArea = CGRect(x: 0, y: 0, width: Video.width, height: Video.height)
-    static let croppedArea = CGRect(x: (0x7A - Video.firstLowresColumn) * 2, y: 32,
-                                    width: Video.width - (0x7A - Video.firstLowresColumn) * 2, height: Video.height - 32)
+    static let standardLines = 44...299
+    static func croppedArea(lines: ClosedRange<Int>) -> CGRect {
+        let top = max(lines.lowerBound - 8, 0), bottom = min(lines.upperBound + 1 + 8, Video.height)
+        return CGRect(x: (0x7A - Video.firstLowresColumn) * 2, y: top,
+                      width: Video.width - (0x7A - Video.firstLowresColumn) * 2, height: bottom - top)
+    }
     /// Part of the frame shown, in frame pixels (hires columns × beam lines).
     var visibleArea = DisplayView.fullArea {
         didSet { shownPixels = Data() } // redraw the next frame even if it is unchanged
@@ -433,6 +438,27 @@ final class DisplayView: NSView {
     override func mouseUp(with event: NSEvent) { if mouseCaptured { left = false; sendMouse(dx: 0, dy: 0) } }
     override func rightMouseDown(with event: NSEvent) { if mouseCaptured { right = true; sendMouse(dx: 0, dy: 0) } }
     override func rightMouseUp(with event: NSEvent) { if mouseCaptured { right = false; sendMouse(dx: 0, dy: 0) } }
+
+    // MARK: Drag and drop
+
+    /// Floppy (.adf) and hard disk (.hdf) images dropped on the window go to DF0 and DH0; a Kickstart ROM
+    /// (.rom or .bin) is opened as with Machine ▸ Kickstart ROM.
+    static let droppableExtensions: Set<String> = ["adf", "hdf", "rom", "bin"]
+    var onFileDrop: ((URL) -> Void)?
+
+    private func droppedURL(_ sender: NSDraggingInfo) -> URL? {
+        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self],
+                                                         options: [.urlReadingFileURLsOnly: true]) as? [URL]
+        return urls?.first { DisplayView.droppableExtensions.contains($0.pathExtension.lowercased()) }
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { droppedURL(sender) == nil ? [] : .copy }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard let url = droppedURL(sender) else { return false }
+        onFileDrop?(url)
+        return true
+    }
 }
 
 @MainActor
@@ -451,6 +477,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.wantsLayer = true
         window.contentView = view
         window.contentAspectRatio = view.frame.size
+        addDriveLights()
         if UserDefaults.standard.bool(forKey: "CropBorders") { showArea(cropped: true) }
         window.center()
         view.emulator = emulator
@@ -460,6 +487,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.acceptsMouseMovedEvents = true
         NSApp.activate(ignoringOtherApps: true)
         view.onMouseCaptureChange = { [weak self] in self?.updateTitle() }
+        view.registerForDraggedTypes([.fileURL])
+        view.onFileDrop = { [weak self] url in
+            switch url.pathExtension.lowercased() {
+            case "hdf": self?.attach(hardDisk: url)
+            case "rom", "bin": self?.open(rom: url, extended: nil)
+            default: self?.insert(adf: url)
+            }
+        }
         NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification, object: window,
                                                queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.view.releaseMouse(); self?.view.releaseJoystick() }
@@ -503,17 +538,99 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             emulator.runFrame()
         }
-        if let video = emulator.machine?.memory.video { view.show(video) }
+        if let video = emulator.machine?.memory.video {
+            fitCrop(to: video.displayedLines)
+            view.show(video)
+        }
+        updateDriveLights()
     }
 
+    /// Lines the cropped view fits, and a different range seen in recent frames with how many
+    /// frames in a row it has been seen.
+    private var croppedLines = DisplayView.standardLines
+    private var candidateLines = DisplayView.standardLines, candidateFrames = 0
+
+    /// With Crop Borders on, follows the lines the game shows bitplanes on once they have
+    /// stayed the same for half a second (screens switching DMA mid-frame show partial ranges
+    /// for a frame or two). Frames without bitplanes, or with fewer than 100 lines of them,
+    /// keep the current crop.
+    private func fitCrop(to lines: ClosedRange<Int>?) {
+        guard UserDefaults.standard.bool(forKey: "CropBorders"), let lines, lines.count >= 100,
+              lines != croppedLines else { candidateFrames = 0; return }
+        if lines == candidateLines { candidateFrames += 1 } else { candidateLines = lines; candidateFrames = 1 }
+        guard candidateFrames >= 25 else { return }
+        croppedLines = lines
+        showArea(cropped: true, keepingWidth: true)
+    }
+
+    /// Names the disks in the drives; the Kickstart ROM is checked in Machine ▸ Kickstart ROM.
     private func updateTitle() {
-        let rom = (emulator.romURL?.lastPathComponent ?? "no Kickstart")
-            + (emulator.extendedROMURL.map { " + \($0.lastPathComponent)" } ?? "")
-        let disk = emulator.diskURL?.lastPathComponent ?? "empty"
-        let hardDisk = emulator.hardDiskURL.map { " — DH0: \($0.lastPathComponent)" } ?? ""
-        let hint = view.mouseCaptured ? " — ⌘ releases the mouse" : ""
-        let warp = emulator.warp ? " — warp" : ""
-        window.title = "MacMiga — \(rom) — DF0: \(disk)\(hardDisk)\(warp)\(hint)"
+        var parts = ["DF0: " + (emulator.diskURL?.lastPathComponent ?? "empty")]
+        if let hardDisk = emulator.hardDiskURL { parts.append("DH0: " + hardDisk.lastPathComponent) }
+        if emulator.machine == nil { parts.append("No Kickstart") }
+        if emulator.warp { parts.append("Warp") }
+        if view.mouseCaptured { parts.append("⌘ releases the mouse") }
+        window.title = parts.joined(separator: "   ")
+    }
+
+    // MARK: Drive lights
+
+    /// Activity lights at the left of the title bar, as in the C64 emulator: DF0 (green while
+    /// the floppy motor runs; the A500's drive light is wired to the motor) and DH0 (green while
+    /// blocks are read, orange while they are written; shown only with a hard disk attached).
+    /// The Kickstart ROM gets no light: it is read on every instruction, so it would always be lit.
+    private let driveLights = (0..<2).map { NSView(frame: NSRect(x: 6 + $0 * 48, y: 8, width: 12, height: 12)) }
+    private let driveLabels = ["DF0", "DH0"].enumerated().map { index, name -> NSTextField in
+        let label = NSTextField(labelWithString: name)
+        label.font = .systemFont(ofSize: 10, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        label.frame = NSRect(x: 21 + index * 48, y: 7, width: 28, height: 14)
+        return label
+    }
+    private var lastHardDiskCounts = (read: 0, written: 0), hardDiskLitFrames = 0, hardDiskWriting = false
+    private var lastLights: [NSColor?] = [.clear, .clear] // neither colour nor hidden, so the first update sets both
+
+    private func addDriveLights() {
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 102, height: 28))
+        for (light, label) in zip(driveLights, driveLabels) {
+            light.wantsLayer = true
+            light.layer?.cornerRadius = 6
+            box.addSubview(light)
+            box.addSubview(label)
+        }
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = box
+        accessory.layoutAttribute = .leading
+        window.addTitlebarAccessoryViewController(accessory)
+        updateDriveLights()
+    }
+
+    private func updateDriveLights() {
+        let drive = emulator.machine?.memory.drive
+        let floppy: NSColor = drive?.motorOn == true ? .systemGreen : .systemGray
+        var hard: NSColor?
+        if let disk = emulator.hardDisk {
+            let counts = (read: disk.blocksRead, written: disk.blocksWritten)
+            if counts != lastHardDiskCounts {
+                hardDiskWriting = counts.written != lastHardDiskCounts.written
+                hardDiskLitFrames = 5 // 100 ms, so single block transfers are visible
+                lastHardDiskCounts = counts
+            } else if hardDiskLitFrames > 0 {
+                hardDiskLitFrames -= 1
+            }
+            hard = hardDiskLitFrames == 0 ? .systemGray : hardDiskWriting ? .systemOrange : .systemGreen
+        }
+        let lights = [floppy, hard]
+        let help = [drive?.motorOn == true ? "motor on" : "idle",
+                    hardDiskLitFrames == 0 ? "idle" : hardDiskWriting ? "writing" : "reading"]
+        for index in 0..<2 where lights[index] != lastLights[index] {
+            lastLights[index] = lights[index]
+            driveLights[index].isHidden = lights[index] == nil
+            driveLabels[index].isHidden = lights[index] == nil
+            driveLights[index].layer?.backgroundColor = lights[index]?.cgColor
+            driveLights[index].toolTip = "\(driveLabels[index].stringValue): \(help[index])"
+            driveLabels[index].toolTip = driveLights[index].toolTip
+        }
     }
 
     /// Game controllers report changes on the main queue; connect/disconnect refreshes port 2.
@@ -678,16 +795,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         showArea(cropped: cropped)
     }
 
-    /// Shows the whole frame or the cropped area, keeping the window's height and its
-    /// pixel aspect (each beam line two points high, each hires pixel one point wide).
-    private func showArea(cropped: Bool) {
-        let area = cropped ? DisplayView.croppedArea : DisplayView.fullArea
+    /// Shows the whole frame or the cropped area, keeping the window's height (or width) and
+    /// its pixel aspect (each beam line two points high, each hires pixel one point wide).
+    private func showArea(cropped: Bool, keepingWidth: Bool = false) {
+        let area = cropped ? DisplayView.croppedArea(lines: croppedLines) : DisplayView.fullArea
+        guard area != view.visibleArea else { return }
         view.visibleArea = area
         let aspect = NSSize(width: area.width, height: area.height * 2)
-        let height = window.contentLayoutRect.height
+        let content = window.contentLayoutRect.size
         window.contentAspectRatio = aspect
-        var frame = window.frameRect(forContentRect: NSRect(x: 0, y: 0, width: height * aspect.width / aspect.height,
-                                                             height: height))
+        let size = keepingWidth ? NSSize(width: content.width, height: content.width * aspect.height / aspect.width)
+                                : NSSize(width: content.height * aspect.width / aspect.height, height: content.height)
+        var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
         frame.origin = NSPoint(x: window.frame.midX - frame.width / 2, y: window.frame.maxY - frame.height)
         window.setFrame(frame, display: true)
     }
@@ -706,7 +825,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         main.addItem(appItem)
         let machineItem = NSMenuItem()
         let machine = NSMenu(title: "Machine")
-        machine.addItem(withTitle: "Open Kickstart ROM…", action: #selector(chooseROM), keyEquivalent: "k")
+        let kickstart = NSMenu(title: "Kickstart ROM")
+        kickstart.delegate = self // refilled each time it opens
+        menuNeedsUpdate(kickstart)
+        machine.addItem(withTitle: "Kickstart ROM", action: nil, keyEquivalent: "").submenu = kickstart
         machine.addItem(withTitle: "Open Extended ROM ($E00000)…", action: #selector(chooseExtendedROM), keyEquivalent: "")
         machine.addItem(withTitle: "Insert Disk (DF0)…", action: #selector(chooseADF), keyEquivalent: "o")
         machine.addItem(withTitle: "Eject Disk", action: #selector(ejectDisk), keyEquivalent: "e")
@@ -747,6 +869,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         crop.state = UserDefaults.standard.bool(forKey: "CropBorders") ? .on : .off
         main.addItem(viewItem)
         NSApp.mainMenu = main
+    }
+}
+
+/// Machine ▸ Kickstart ROM lists the ROM files (.rom, .bin) in the folder of the loaded
+/// Kickstart and in `Kickstart ROMs` beside the working directory, the loaded one checked;
+/// choosing one restarts the machine with it, without an extended ROM.
+extension AppDelegate: NSMenuDelegate {
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let folders = [emulator.romURL?.deletingLastPathComponent(), URL(fileURLWithPath: "Kickstart ROMs")]
+            .compactMap { $0?.standardizedFileURL }
+        var roms: [URL] = []
+        for folder in folders {
+            let files = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+            for file in files.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending })
+            where ["rom", "bin"].contains(file.pathExtension.lowercased()) && !roms.contains(file.standardizedFileURL) {
+                roms.append(file.standardizedFileURL)
+            }
+        }
+        for rom in roms {
+            let item = menu.addItem(withTitle: rom.lastPathComponent, action: #selector(chooseListedROM(_:)), keyEquivalent: "")
+            item.representedObject = rom
+            item.state = rom == emulator.romURL?.standardizedFileURL ? .on : .off
+            item.target = self
+        }
+        if !roms.isEmpty { menu.addItem(.separator()) }
+        menu.addItem(withTitle: "Other Kickstart ROM…", action: #selector(chooseROM), keyEquivalent: "k").target = self
+    }
+
+    @objc func chooseListedROM(_ sender: NSMenuItem) {
+        if let url = sender.representedObject as? URL { open(rom: url, extended: nil) }
     }
 }
 

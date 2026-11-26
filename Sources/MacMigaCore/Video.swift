@@ -43,6 +43,10 @@ public struct Video: Equatable, Sendable {
     public private(set) var pixels = [UInt32](repeating: 0xFF00_0000, count: width * height)
     /// Number of frames completed since power-on.
     public internal(set) var frameCount = 0
+    /// Beam lines on which bitplanes were shown in the last completed frame (nil if none).
+    public internal(set) var displayedLines: ClosedRange<Int>?
+    /// The same range for the frame being drawn.
+    var displayingLines: ClosedRange<Int>?
 
     public init() {}
 
@@ -114,6 +118,8 @@ extension AmigaMemory {
             if frameEnded {
                 frames += 1
                 video.frameCount += 1
+                video.displayedLines = video.displayingLines
+                video.displayingLines = nil
                 copper.jump(to: custom.copperLocation(1))
                 for index in 0..<8 { custom.sprites[index].dma = .idle }
             }
@@ -293,6 +299,7 @@ extension AmigaMemory {
             }
             return
         }
+        video.displayingLines = video.displayingLines.map { min($0.lowerBound, line)...line } ?? line...line
         let fetchStart = Int(custom.register(R.ddfstrt) & 0xFC)
         let fetchStop = Int(custom.register(R.ddfstop) & 0xFC)
         // Fetch runs in 8-colour-clock units from DDFSTRT; the unit in progress when DDFSTOP
