@@ -443,7 +443,7 @@ final class DisplayView: NSView {
 
     /// Floppy (.adf) and hard disk (.hdf) images dropped on the window go to DF0 and DH0; a Kickstart ROM
     /// (.rom or .bin) is opened as with Machine ▸ Kickstart ROM.
-    static let droppableExtensions: Set<String> = ["adf", "hdf", "rom", "bin"]
+    static let droppableExtensions: Set<String> = ["adf", "dms", "hdf", "rom", "bin"]
     var onFileDrop: ((URL) -> Void)?
 
     private func droppedURL(_ sender: NSDraggingInfo) -> URL? {
@@ -700,7 +700,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let rom = emulator.romURL else { chooseROM(); return }
         if let url = choose(["rom", "bin"]) { open(rom: rom, extended: url) }
     }
-    @objc func chooseADF() { if let url = choose(["adf"]) { insert(adf: url) } }
+    @objc func chooseADF() { if let url = choose(["adf", "dms"]) { insert(adf: url) } }
     @objc func ejectDisk() { emulator.eject(); updateTitle() }
     @objc func chooseHardDisk() { if let url = choose(["hdf"]) { attach(hardDisk: url) } }
     @objc func detachHardDisk() { attach(hardDisk: nil) }

@@ -59,6 +59,7 @@ public struct FloppyDrive: Equatable, Sendable {
     }
 
     static func parse(_ image: [UInt8]) throws -> ([UInt8], [Int: [UInt16]]) {
+        if image.starts(with: Array("DMS!".utf8)) { return try parse(DMS.unpack(image)) }
         func word(_ offset: Int) -> Int { Int(image[offset]) << 8 | Int(image[offset + 1]) }
         func long(_ offset: Int) -> Int { word(offset) << 16 | word(offset + 2) }
         /// A track's stored bytes; a track that runs past the end of the file (other than a

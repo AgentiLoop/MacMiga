@@ -106,10 +106,7 @@ struct KickstartProbe {
                                          custom.blitterPointers[2], custom.blitterPointers[3], custom.diskPointer, custom.dmacon))
                         }
                         watched = value
-                        frame = machine.memory.video.frameCount
-                        continue
-                    }
-                    if let from = exceptionsFrom, frame >= from, reported < 40 {
+                    } else if let from = exceptionsFrom, frame >= from, reported < 40 {
                         let before = machine.cpu.programCounter, wasSupervisor = machine.cpu.statusRegister & 0x2000 != 0
                         let stack = machine.cpu.supervisorStackPointer
                         if history > 0 { recent[completed % history] = (before, machine.cpu.statusRegister, machine.cpu[address: 7]) }
@@ -131,30 +128,27 @@ struct KickstartProbe {
                             print(String(format: "Vector %d taken in frame %d at $%08X: %@ (%@ mode) SSP=$%08X USP=$%08X D: %@ A: %@", vector + 2, frame, before,
                                          words.joined(separator: " "), wasSupervisor ? "supervisor" : "user", stack, machine.cpu.userStackPointer, data, address))
                         }
-                        if machine.memory.video.frameCount != frame {
-                            frame = machine.memory.video.frameCount
-                            handlers = (2...11).map { (try? machine.memory.readLong(at: UInt32($0 * 4))) ?? 0 }
-                        }
-                        continue
-                    }
-                    if history > 0 {
-                        let pc = machine.cpu.programCounter
-                        if pc > 0xFF_FFFF || (pc >= UInt32(chipRAM) && pc < 0x20_0000) {
-                            print(String(format: "PC left the address space or entered the mirrors of chip RAM after %d instructions, in frame %d. Last %d instructions:", completed, frame, history))
-                            for index in 0..<history {
-                                let entry = recent[(completed + index) % history]
-                                let words = (0..<3).map { String(format: "%04X", (try? machine.memory.readWord(at: entry.pc &+ UInt32($0 * 2))) ?? 0) }
-                                print(String(format: "  $%08X: %@  SR=%04X A7=%08X", entry.pc, words.joined(separator: " "), entry.sr, entry.a7))
+                    } else {
+                        if history > 0 {
+                            let pc = machine.cpu.programCounter
+                            if pc > 0xFF_FFFF || (pc >= UInt32(chipRAM) && pc < 0x20_0000) {
+                                print(String(format: "PC left the address space or entered the mirrors of chip RAM after %d instructions, in frame %d. Last %d instructions:", completed, frame, history))
+                                for index in 0..<history {
+                                    let entry = recent[(completed + index) % history]
+                                    let words = (0..<3).map { String(format: "%04X", (try? machine.memory.readWord(at: entry.pc &+ UInt32($0 * 2))) ?? 0) }
+                                    print(String(format: "  $%08X: %@  SR=%04X A7=%08X", entry.pc, words.joined(separator: " "), entry.sr, entry.a7))
+                                }
+                                break
                             }
-                            break
+                            recent[completed % history] = (pc, machine.cpu.statusRegister, machine.cpu[address: 7])
                         }
-                        recent[completed % history] = (pc, machine.cpu.statusRegister, machine.cpu[address: 7])
+                        try machine.step()
+                        completed += 1
                     }
-                    try machine.step()
-                    completed += 1
                     guard machine.memory.video.frameCount != frame else { continue }
                     // Scripted input: a key is held for 5 frames, the port-2 fire button for 10.
                     frame = machine.memory.video.frameCount
+                    if exceptionsFrom != nil { handlers = (2...11).map { (try? machine.memory.readLong(at: UInt32($0 * 4))) ?? 0 } }
                     for press in presses {
                         if press.frame == frame { machine.key(press.key, pressed: true) }
                         if press.frame + 5 == frame { machine.key(press.key, pressed: false) }
@@ -201,6 +195,7 @@ struct KickstartProbe {
             }
             let custom = machine.memory.custom
             print(String(format: "BPLCON0=$%04X DIW=$%04X-$%04X DDF=$%04X-$%04X", custom.register(0x100), custom.register(0x08E), custom.register(0x090), custom.register(0x092), custom.register(0x094)))
+            for (n, c) in [("A", machine.memory.ciaA), ("B", machine.memory.ciaB)] { print(String(format: "TMPCIA %@ TA=%04X LA=%04X CRA=%02X TB=%04X LB=%04X CRB=%02X ICR=%02X MASK=%02X", n, c.timerA, c.latchA, c.controlA, c.timerB, c.latchB, c.controlB, c.interruptData, c.interruptMask)) }
             print("COLOR00-07: " + (0..<8).map { String(format: "$%03X", custom.register(0x180 + $0 * 2)) }.joined(separator: " "))
             for line in systemReport(&machine.memory) { print(line) }
             if !custom.serialOutput.isEmpty {
