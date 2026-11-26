@@ -101,11 +101,13 @@ public struct CustomChips: Equatable, Sendable {
     public var interruptLevel: Int {
         guard intena & 0x4000 != 0 else { return 0 }
         let pending = intena & intreq & 0x3FFF
-        guard pending != 0 else { return 0 }
-        let highest = 15 - pending.leadingZeroBitCount
-        // Paula priority levels for INTREQ bits 0–13.
-        let levels = [1, 1, 1, 2, 3, 3, 3, 4, 4, 4, 4, 5, 5, 6]
-        return levels[highest]
+        // Test priority groups from highest to lowest without an indexed lookup.
+        if pending & 0x2000 != 0 { return 6 }
+        if pending & 0x1800 != 0 { return 5 }
+        if pending & 0x0780 != 0 { return 4 }
+        if pending & 0x0070 != 0 { return 3 }
+        if pending & 0x0008 != 0 { return 2 }
+        return pending & 0x0007 != 0 ? 1 : 0
     }
 
     public mutating func readWord(offset: Int) -> UInt16 {
