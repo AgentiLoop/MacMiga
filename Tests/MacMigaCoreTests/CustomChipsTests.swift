@@ -87,6 +87,33 @@ private func customMemory() throws -> AmigaMemory {
     #expect(chips.interruptLevel == 0)
 }
 
+@Test func cachedInterruptLevelTracksSourcesAndCopies() {
+    var chips = CustomChips()
+    chips.writeWord(offset: 0x9A, value: 0xC029) // master, VERTB, PORTS, TBE
+    chips.writeWord(offset: 0x30, value: 0x0141)
+    #expect(chips.interruptLevel == 1)
+    chips.requestInterrupt(bits: 0x0008)
+    #expect(chips.interruptLevel == 2)
+    chips.advance(colorClocks: CustomChips.colorClocksPerLine * CustomChips.linesPerFrame)
+    #expect(chips.interruptLevel == 3)
+
+    var copy = chips
+    copy.writeWord(offset: 0x9C, value: 0x0020)
+    #expect(copy.interruptLevel == 2)
+    #expect(chips.interruptLevel == 3)
+    copy.writeWord(offset: 0x9C, value: 0x0008)
+    #expect(copy.interruptLevel == 1)
+    copy.writeWord(offset: 0x9C, value: 0x0001)
+    #expect(copy.interruptLevel == 0)
+    copy.requestInterrupt(bits: 0x0001)
+    copy.requestInterrupt(bits: 0x0001) // unchanged request still preserves the cache
+    #expect(copy.interruptLevel == 1)
+    copy.writeWord(offset: 0x9A, value: 0x4000)
+    #expect(copy.interruptLevel == 0)
+    copy.writeWord(offset: 0x9A, value: 0xC000)
+    #expect(copy.interruptLevel == 1)
+}
+
 @Test func beamCounterWrapsAndRaisesVerticalBlank() throws {
     var memory = try customMemory()
     let first = memory.custom.advance(colorClocks: 227 * 2 + 5)
