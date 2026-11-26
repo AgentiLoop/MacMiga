@@ -220,17 +220,24 @@ public struct FloppyDrive: Equatable, Sendable {
 }
 
 /// Paula disk DMA. A transfer starts when DSKLEN is written twice with DMAEN (bit 15)
-/// while DMACON DMAEN and DSKEN are set, and completes at once (no bit-rate timing).
-/// Reads with ADKCON WORDSYNC wait for DSKSYNC in the rotating track (raising INTREQ
-/// DSKSYN) and copy the words after it; without a disk, a synced read never completes.
-/// Writes are discarded (disks are write-protected). Completion raises INTREQ DSKBLK.
+/// while DMACON DMAEN and DSKEN are set. Reads with ADKCON WORDSYNC wait for DSKSYNC in
+/// the rotating track (raising INTREQ DSKSYN) and copy the words after it; without a disk,
+/// a synced read never completes. Writes are discarded (disks are write-protected). The
+/// words are in memory at once, but INTREQ DSKBLK follows only after the time the head
+/// takes to pass over them at 2 µs per bit cell (`colorClocksPerWord` per word, the wait
+/// for the sync included): trackloaders clear DSKBLK after starting a transfer and then
+/// wait for it.
 extension AmigaMemory {
+    /// 16 bit cells of 2 µs at 3,546,895 colour clocks a second.
+    static let colorClocksPerWord = 114
+
     mutating func runPendingDiskDMA() {
         typealias R = CustomChips.Register
         guard custom.diskDMAPending, custom.dmacon & 0x0210 == 0x0210 else { return }
         custom.diskDMAPending = false
         drive.activity &+= 1
         let length = Int(custom.register(R.dsklen) & 0x3FFF)
+        var waited = 0
         if custom.register(R.dsklen) & 0x4000 == 0 {
             let track = drive.selected ? drive.currentTrack().flatMap { $0.isEmpty ? nil : $0 } : nil
             var position = drive.rotation
@@ -244,6 +251,7 @@ extension AmigaMemory {
                         track[(position + $0) % track.count] == sync
                     }) else { return }
                     position = (position + found + 1) % track.count
+                    waited = found + 1
                     custom.requestInterrupt(bits: 0x1000)
                 }
             } else if custom.adkcon & 0x0400 != 0 {
@@ -260,6 +268,6 @@ extension AmigaMemory {
         } else {
             custom.diskPointer = (custom.diskPointer &+ UInt32(length * 2)) & 0x1F_FFFE
         }
-        custom.requestInterrupt(bits: 0x0002)
+        custom.diskBlockDelay = max(1, (waited + length) * Self.colorClocksPerWord)
     }
 }

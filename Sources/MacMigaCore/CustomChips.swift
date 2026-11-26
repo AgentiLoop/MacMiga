@@ -73,6 +73,8 @@ public struct CustomChips: Equatable, Sendable {
     private var diskLengthArmed = false
     /// Set when a disk transfer has been started and not yet run.
     public internal(set) var diskDMAPending = false
+    /// Colour clocks until the running disk transfer ends and raises DSKBLK; 0 when none runs.
+    public internal(set) var diskBlockDelay = 0
     /// Bytes software wrote to the serial port (SERDAT), oldest first; the host may read
     /// and clear them. Only the most recent ones are kept.
     public var serialOutput: [UInt8] = []
@@ -186,6 +188,7 @@ public struct CustomChips: Equatable, Sendable {
             if value & 0x8000 == 0 {
                 diskLengthArmed = false
                 diskDMAPending = false
+                diskBlockDelay = 0
             } else if diskLengthArmed {
                 diskLengthArmed = false
                 diskDMAPending = true

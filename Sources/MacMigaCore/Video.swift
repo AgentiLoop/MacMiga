@@ -94,6 +94,13 @@ extension AmigaMemory {
             }
             if custom.blitPending { runPendingBlit() }
             if custom.diskDMAPending { runPendingDiskDMA() }
+            if custom.diskBlockDelay > 0 {
+                custom.diskBlockDelay -= count
+                if custom.diskBlockDelay <= 0 {
+                    custom.diskBlockDelay = 0
+                    custom.requestInterrupt(bits: 0x0002) // DSKBLK
+                }
+            }
             stepAudio(colorClocks: count)
             remaining -= count
             let line = custom.verticalPosition

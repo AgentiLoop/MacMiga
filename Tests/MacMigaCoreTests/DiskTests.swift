@@ -92,7 +92,13 @@ private func startDiskRead(_ memory: inout AmigaMemory, words: UInt16, sync: Boo
 @Test func syncedDiskReadCopiesWordsAfterSyncAndRaisesDiskBlock() throws {
     var memory = try driveMemory(disk: true)
     try startDiskRead(&memory, words: 8, sync: true)
-    #expect(memory.custom.intreq & 0x1002 == 0x1002) // DSKSYN and DSKBLK
+    #expect(memory.custom.intreq & 0x1002 == 0x1000) // DSKSYN; DSKBLK waits for the head
+    // 3 words up to and including the first sync and 8 words read, 114 colour clocks each,
+    // one of them already run.
+    memory.advanceChipset(colorClocks: 11 * 114 - 2)
+    #expect(memory.custom.intreq & 0x0002 == 0)
+    memory.advanceChipset(colorClocks: 1)
+    #expect(memory.custom.intreq & 0x0002 != 0)
     let track = FloppyDrive.encodeTrack(patternADF(), track: 0)
     #expect(try memory.readWord(at: 0x10000) == 0x4489) // second sync word of sector 0
     for i in 1..<8 { #expect(try memory.readWord(at: 0x10000 + UInt32(i * 2)) == track[3 + i]) }
@@ -106,6 +112,7 @@ private func startDiskRead(_ memory: inout AmigaMemory, words: UInt16, sync: Boo
     #expect(memory.custom.intreq & 0x0002 == 0)
     try memory.writeWord(0x4000, at: 0xDFF024) // cancel; unsynced reads complete with zeros
     try startDiskRead(&memory, words: 4, sync: false)
+    memory.advanceChipset(colorClocks: 4 * 114)
     #expect(memory.custom.intreq & 0x0002 != 0)
 }
 
@@ -174,6 +181,7 @@ private func startDiskRead(_ memory: inout AmigaMemory, words: UInt16, sync: Boo
     try memory.insertDisk(adf: old(rawLength: 4))
     memory.drive.rotation = 5000
     try startDiskRead(&memory, words: 6, sync: false)
+    memory.advanceChipset(colorClocks: 6 * 114)
     #expect(memory.custom.intreq & 0x0002 != 0)
     let read = try (0..<6).map { try memory.readWord(at: 0x10000 + UInt32($0 * 2)) }
     #expect(Set(read) == [0x4489, 0xAAAA])
