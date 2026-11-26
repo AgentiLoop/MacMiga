@@ -39,8 +39,16 @@ public struct CustomChips: Equatable, Sendable {
     public static let linesPerFrame = 312
 
     public private(set) var dmacon: UInt16 = 0
-    public private(set) var intena: UInt16 = 0
-    public private(set) var intreq: UInt16 = 0
+    public private(set) var intena: UInt16 = 0 {
+        didSet {
+            if intena != oldValue { interruptLevel = calculatedInterruptLevel }
+        }
+    }
+    public private(set) var intreq: UInt16 = 0 {
+        didSet {
+            if intreq != oldValue { interruptLevel = calculatedInterruptLevel }
+        }
+    }
     public private(set) var adkcon: UInt16 = 0
     public private(set) var verticalPosition = 0
     public private(set) var horizontalPosition = 0
@@ -98,7 +106,10 @@ public struct CustomChips: Equatable, Sendable {
     public init(agnus: Agnus = .ocs) { self.agnus = agnus }
 
     /// 68000 interrupt level Paula asserts (0 = none); requires the INTEN master bit.
-    public var interruptLevel: Int {
+    /// Updated on register changes so CPU steps only load the cached level.
+    public private(set) var interruptLevel = 0
+
+    private var calculatedInterruptLevel: Int {
         guard intena & 0x4000 != 0 else { return 0 }
         let pending = intena & intreq & 0x3FFF
         // Test priority groups from highest to lowest without an indexed lookup.
