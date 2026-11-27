@@ -762,11 +762,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return FileHandle(forWritingAtPath: path)
     }()
 
-    /// Debug: one line per shown frame in /tmp/macmiga-trace.log (bitplane pointers, scroll, copper list).
-    private let traceLog: FileHandle? = {
-        FileManager.default.createFile(atPath: "/tmp/macmiga-trace.log", contents: nil)
-        return FileHandle(forWritingAtPath: "/tmp/macmiga-trace.log")
-    }()
 
     private func tick() {
         if emulator.warp || emulator.diskBusy() {
@@ -781,7 +776,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             fitCrop(to: video.displayedLines, columns: video.displayedColumns)
             view.show(video)
             if let frameDump { frameDump.write(video.pixels.withUnsafeBufferPointer { Data(buffer: $0) }) }
-            traceLog?.write(Data("\(video.frameCount) \(video.traceDisplayed)\n".utf8))
         }
         updateDriveLights()
     }
