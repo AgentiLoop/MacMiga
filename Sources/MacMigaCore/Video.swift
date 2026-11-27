@@ -48,6 +48,10 @@ public struct Video: Equatable, Sendable {
     public internal(set) var displayedLines: ClosedRange<Int>?
     /// The same range for the frame being drawn.
     var displayingLines: ClosedRange<Int>?
+    /// Columns (hires, as in `pixels`) of the display window on those lines, widest extent
+    /// over the frame (nil if none).
+    public internal(set) var displayedColumns: ClosedRange<Int>?
+    var displayingColumns: ClosedRange<Int>?
     /// Debug: bitplane pointers, scroll and copper list when the last completed frame first showed bitplanes.
     public internal(set) var traceDisplayed = ""
     var traceDisplaying = ""
@@ -124,6 +128,8 @@ extension AmigaMemory {
                 video.frameCount += 1
                 video.displayedLines = video.displayingLines
                 video.displayingLines = nil
+                video.displayedColumns = video.displayingColumns
+                video.displayingColumns = nil
                 video.traceDisplayed = video.traceDisplaying
                 video.traceDisplaying = ""
                 copper.jump(to: custom.copperLocation(1))
@@ -314,6 +320,13 @@ extension AmigaMemory {
                                            custom.copperLocation(1), copper.programCounter)
         }
         video.displayingLines = video.displayingLines.map { min($0.lowerBound, line)...line } ?? line...line
+        let firstColumn = max((Int(diwStart & 0xFF) - Video.firstLowresColumn) * 2, 0)
+        let lastColumn = min(((Int(diwStop & 0xFF) | 0x100) - Video.firstLowresColumn) * 2, Video.width) - 1
+        if firstColumn <= lastColumn {
+            video.displayingColumns = video.displayingColumns.map {
+                min($0.lowerBound, firstColumn)...max($0.upperBound, lastColumn)
+            } ?? firstColumn...lastColumn
+        }
         let fetchStart = Int(custom.register(R.ddfstrt) & 0xFC)
         let fetchStop = Int(custom.register(R.ddfstop) & 0xFC)
         // Fetch runs in 8-colour-clock units from DDFSTRT; the unit in progress when DDFSTOP

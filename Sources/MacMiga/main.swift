@@ -38,6 +38,10 @@ final class Emulator {
     }
     /// 1 MiB of chip RAM with the ECS Agnus instead of 512 KiB with the OCS one; off by default.
     private(set) var bigChipRAM = UserDefaults.standard.bool(forKey: "ChipRAM1MB")
+    /// An NTSC machine (60 frames a second, 262 lines) instead of PAL; off by default.
+    private(set) var ntsc = UserDefaults.standard.bool(forKey: "NTSC")
+    /// Frames a second the machine makes.
+    var frameRate: Double { ntsc ? 60 : 50 }
     var onError: ((String) -> Void)?
     let audio = AudioOutput()
 
@@ -45,7 +49,7 @@ final class Emulator {
         let extendedROM = try extended.map { Array(try Data(contentsOf: $0)) } ?? []
         var machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)), extendedROM: extendedROM,
                                        chipRAMSize: bigChipRAM ? 1 << 20 : 512 << 10,
-                                       fastRAMSize: fastRAM << 20, hardDisk: hardDisk)
+                                       fastRAMSize: fastRAM << 20, hardDisk: hardDisk, ntsc: ntsc)
         if let audio { machine.memory.audio.sampleRate = audio.sampleRate }
         self.machine = machine
         romURL = url
@@ -98,6 +102,12 @@ final class Emulator {
     func setBigChipRAM(_ enabled: Bool) throws {
         bigChipRAM = enabled
         UserDefaults.standard.set(enabled, forKey: "ChipRAM1MB")
+        try reset()
+    }
+
+    func setNTSC(_ enabled: Bool) throws {
+        ntsc = enabled
+        UserDefaults.standard.set(enabled, forKey: "NTSC")
         try reset()
     }
 
@@ -157,7 +167,7 @@ final class Emulator {
                 steps += 1
             }
             let samples = machine.memory.audio.drainSamples()
-            if playAudio { audio?.queue.push(samples) }
+            if playAudio { audio?.queue.push(resampled(samples)) }
             self.machine = machine
             if machine.memory.video.frameCount % 50 == 0 { saveHardDisk() }
         } catch {
@@ -172,6 +182,29 @@ final class Emulator {
     }
 
     func joystick(_ state: Joystick, fire: Bool) { machine?.joystick(state, fire: fire) }
+
+    /// How much faster than 50 frames a second the emulation runs (Sync to Display); the
+    /// sound is sped up as much so it keeps pace instead of overflowing the queue.
+    var audioSpeed = 1.0
+    /// Position in the next batch of samples to take, carried between frames.
+    private var resamplePhase = 0.0
+
+    /// Every `audioSpeed`th stereo sample (nearest neighbour).
+    private func resampled(_ samples: [Float]) -> [Float] {
+        guard audioSpeed != 1 else { resamplePhase = 0; return samples }
+        let frames = samples.count / 2
+        var out: [Float] = []
+        out.reserveCapacity(Int(Double(frames) / audioSpeed + 2) * 2)
+        var position = resamplePhase
+        while position < Double(frames) {
+            let index = Int(position) * 2
+            out.append(samples[index])
+            out.append(samples[index + 1])
+            position += audioSpeed
+        }
+        resamplePhase = position - Double(frames)
+        return out
+    }
 }
 
 /// Thread-safe FIFO of interleaved stereo samples between the emulator (main thread) and
@@ -259,11 +292,21 @@ final class DisplayView: MTKView, MTKViewDelegate {
 
     private let queue: MTLCommandQueue
     private let pipeline: MTLRenderPipelineState
-    /// Three textures in rotation: a new frame is always copied into one the GPU isn't reading.
-    private var textures: [MTLTexture?] = [nil, nil, nil]
-    private var current = 0
-    /// Command buffers in flight, at most one fewer than the textures.
+    /// Four textures in rotation: a new frame is always copied into one the GPU isn't reading
+    /// (each draw reads two, the newest and the one before it, and two draws can be in flight).
+    private var textures: [MTLTexture?] = [nil, nil, nil, nil]
+    private var current = 0, previous = 0
+    /// Command buffers in flight.
     private let inFlight = DispatchSemaphore(value: 2)
+
+    /// Frame Blending: each refresh shows the previous frame mixed with the newest one,
+    /// `blendWeight` of the newest, so 50 frames a second move evenly on a 60 Hz display.
+    var frameBlending = UserDefaults.standard.bool(forKey: "FrameBlending") {
+        didSet { needsRedraw = true }
+    }
+    var blendWeight: Float = 1
+    /// A frame arrived since the last draw (maybe the same picture as before).
+    private var newFrame = false
 
     private static let shaderSource = """
     #include <metal_stdlib>
@@ -276,9 +319,10 @@ final class DisplayView: MTKView, MTKViewDelegate {
         o.uv = rect.xy + t * rect.zw;
         return o;
     }
-    fragment float4 fmain(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
+    fragment float4 fmain(VOut in [[stage_in]], texture2d<float> previous [[texture(0)]],
+                          texture2d<float> current [[texture(1)]], constant float &weight [[buffer(0)]]) {
         constexpr sampler s(filter::nearest, address::clamp_to_edge);
-        return float4(tex.sample(s, in.uv).rgb, 1);
+        return float4(mix(previous.sample(s, in.uv).rgb, current.sample(s, in.uv).rgb, weight), 1);
     }
     """
 
@@ -373,15 +417,16 @@ final class DisplayView: MTKView, MTKViewDelegate {
 
     /// The whole frame is every beam line (0–311, vertical blank included) and lowres
     /// positions $58–$1C8. The standard display window ($2C81–$2CC1, 320×256) is not in its
-    /// middle, so the borders are uneven. The cropped area runs from lowres $7A to $1C8 (the
-    /// frame's right edge, where the beam ends) and fits the lines the game shows bitplanes on
-    /// (lines 44–299 for the standard window), with a few lines of border above and below.
+    /// middle, so the borders are uneven. The cropped area fits the lines and columns the game
+    /// shows bitplanes in (lines 44–299 and lowres $81–$1C0 for the standard window), with a
+    /// little border all round (8 lines above and below, 8 lowres pixels left and right).
     static let fullArea = CGRect(x: 0, y: 0, width: Video.width, height: Video.height)
     static let standardLines = 44...299
-    static func croppedArea(lines: ClosedRange<Int>) -> CGRect {
+    static let standardColumns = (0x81 - Video.firstLowresColumn) * 2...(0x1C1 - Video.firstLowresColumn) * 2 - 1
+    static func croppedArea(lines: ClosedRange<Int>, columns: ClosedRange<Int>) -> CGRect {
         let top = max(lines.lowerBound - 8, 0), bottom = min(lines.upperBound + 1 + 8, Video.height)
-        return CGRect(x: (0x7A - Video.firstLowresColumn) * 2, y: top,
-                      width: Video.width - (0x7A - Video.firstLowresColumn) * 2, height: bottom - top)
+        let left = max(columns.lowerBound - 16, 0), right = min(columns.upperBound + 1 + 16, Video.width)
+        return CGRect(x: left, y: top, width: right - left, height: bottom - top)
     }
     /// Part of the frame shown, in frame pixels (hires columns × beam lines).
     var visibleArea = DisplayView.fullArea {
@@ -393,6 +438,7 @@ final class DisplayView: MTKView, MTKViewDelegate {
 
     /// Shows the frame unless it is the one already on screen, which costs no redraw at all.
     func show(_ video: Video) {
+        newFrame = true
         let unchanged = video.pixels.withUnsafeBytes { new in
             shownPixels.withUnsafeBytes { old in
                 old.count == new.count && memcmp(old.baseAddress, new.baseAddress, new.count) == 0
@@ -413,6 +459,11 @@ final class DisplayView: MTKView, MTKViewDelegate {
         guard inFlight.wait(timeout: .now()) == .success else { return }
         var committed = false
         defer { if !committed { inFlight.signal() } }
+        if newFrame {
+            newFrame = false
+            if previous != current { needsRedraw = true }
+            previous = current
+        }
         if pendingUpload, let device, shownPixels.count >= Video.width * Video.height * 4 {
             pendingUpload = false
             let next = (current + 1) % textures.count
@@ -431,8 +482,10 @@ final class DisplayView: MTKView, MTKViewDelegate {
             current = next
             needsRedraw = true
         }
+        // Blending changes the picture every refresh while the two frames differ.
+        let blending = frameBlending && previous != current
         // Nothing new: leave the last presented picture on screen instead of drawing it again.
-        guard needsRedraw else { return }
+        guard needsRedraw || blending else { return }
         needsRedraw = false
         guard let pass = currentRenderPassDescriptor,
               let drawable = currentDrawable,
@@ -442,9 +495,12 @@ final class DisplayView: MTKView, MTKViewDelegate {
             let r = visibleArea
             var rect = SIMD4<Float>(Float(r.minX) / Float(texture.width), Float(r.minY) / Float(texture.height),
                                     Float(r.width) / Float(texture.width), Float(r.height) / Float(texture.height))
+            var weight: Float = blending ? min(max(blendWeight, 0), 1) : 1
             encoder.setRenderPipelineState(pipeline)
             encoder.setVertexBytes(&rect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
-            encoder.setFragmentTexture(texture, index: 0)
+            encoder.setFragmentBytes(&weight, length: MemoryLayout<Float>.size, index: 0)
+            encoder.setFragmentTexture(textures[previous] ?? texture, index: 0)
+            encoder.setFragmentTexture(texture, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         encoder.endEncoding()
@@ -621,18 +677,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         view.onRefresh = { [weak self] in self?.refresh() }
     }
 
-    /// When the next PAL frame (50 a second) is due, on the CACurrentMediaTime clock.
+    /// When the next frame (50 a second, 60 for NTSC) is due, on the CACurrentMediaTime clock.
     private var nextFrameTime = 0.0
+    /// Sync to Display: one frame per refresh (per two at 100 Hz and up) instead of 50 a second,
+    /// so motion is even on a 60 Hz display, though a PAL game runs that much faster.
+    private var syncToDisplay = UserDefaults.standard.object(forKey: "SyncToDisplay") as? Bool ?? true
+    /// Refreshes since the last frame in Sync to Display.
+    private var refreshCount = 0
 
-    /// Runs the PAL frames due by this display refresh. More than 0.1 s behind (or in warp,
+    /// Runs the frames due by this display refresh. More than 0.1 s behind (or in warp,
     /// which paces itself) the clock restarts instead of catching up.
     private func refresh() {
         let now = CACurrentMediaTime()
-        if emulator.warp || emulator.diskBusy() || now - nextFrameTime > 0.1 { nextFrameTime = now }
+        let fast = emulator.warp || emulator.diskBusy()
+        let rate = emulator.frameRate
+        if syncToDisplay && !fast {
+            let hz = Double(view.window?.screen?.maximumFramesPerSecond ?? 60)
+            let refreshesPerFrame = max(1, Int((hz / rate).rounded()))
+            emulator.audioSpeed = hz / Double(refreshesPerFrame) / rate
+            view.blendWeight = 1
+            refreshCount += 1
+            if refreshCount >= refreshesPerFrame { refreshCount = 0; tick() }
+            nextFrameTime = now
+            return
+        }
+        emulator.audioSpeed = 1
+        if fast || now - nextFrameTime > 0.1 { nextFrameTime = now }
         while now >= nextFrameTime {
-            nextFrameTime += 1.0 / 50.0
+            nextFrameTime += 1 / rate
             tick()
         }
+        // The picture is one frame behind: between the frame before the newest and the newest.
+        view.blendWeight = Float((now - (nextFrameTime - 1 / rate)) * rate)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -662,7 +738,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             emulator.runFrame()
         }
         if let video = emulator.machine?.memory.video {
-            fitCrop(to: video.displayedLines)
+            fitCrop(to: video.displayedLines, columns: video.displayedColumns)
             view.show(video)
             if let frameDump { frameDump.write(video.pixels.withUnsafeBufferPointer { Data(buffer: $0) }) }
             traceLog?.write(Data("\(video.frameCount) \(video.traceDisplayed)\n".utf8))
@@ -670,21 +746,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateDriveLights()
     }
 
-    /// Lines the cropped view fits, and a different range seen in recent frames with how many
-    /// frames in a row it has been seen.
-    private var croppedLines = DisplayView.standardLines
-    private var candidateLines = DisplayView.standardLines, candidateFrames = 0
+    /// Lines and columns the cropped view fits, and a different area seen in recent frames
+    /// with how many frames in a row it has been seen.
+    private var croppedLines = DisplayView.standardLines, croppedColumns = DisplayView.standardColumns
+    private var candidateLines = DisplayView.standardLines, candidateColumns = DisplayView.standardColumns
+    private var candidateFrames = 0
 
-    /// With Crop Borders on, follows the lines the game shows bitplanes on once they have
-    /// stayed the same for half a second (screens switching DMA mid-frame show partial ranges
-    /// for a frame or two). Frames without bitplanes, or with fewer than 100 lines of them,
-    /// keep the current crop.
-    private func fitCrop(to lines: ClosedRange<Int>?) {
+    /// With Crop Borders on, follows the lines and columns the game shows bitplanes in once
+    /// they have stayed the same for half a second (screens switching DMA mid-frame show
+    /// partial ranges for a frame or two). Frames without bitplanes, or with fewer than 100
+    /// lines or 200 columns of them, keep the current crop.
+    private func fitCrop(to lines: ClosedRange<Int>?, columns: ClosedRange<Int>?) {
         guard UserDefaults.standard.bool(forKey: "CropBorders"), let lines, lines.count >= 100,
-              lines != croppedLines else { candidateFrames = 0; return }
-        if lines == candidateLines { candidateFrames += 1 } else { candidateLines = lines; candidateFrames = 1 }
+              let columns, columns.count >= 200,
+              (lines, columns) != (croppedLines, croppedColumns) else { candidateFrames = 0; return }
+        if (lines, columns) == (candidateLines, candidateColumns) {
+            candidateFrames += 1
+        } else {
+            (candidateLines, candidateColumns) = (lines, columns)
+            candidateFrames = 1
+        }
         guard candidateFrames >= 25 else { return }
-        croppedLines = lines
+        (croppedLines, croppedColumns) = (lines, columns)
         showArea(cropped: true, keepingWidth: true)
     }
 
@@ -913,17 +996,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sender.state = emulator.bigChipRAM ? .on : .off
         view.updateJoystick()
     }
+    @objc func toggleNTSC(_ sender: NSMenuItem) {
+        do { try emulator.setNTSC(!emulator.ntsc) } catch { alert("Reset failed: \(error)") }
+        sender.state = emulator.ntsc ? .on : .off
+        view.updateJoystick()
+    }
     @objc func toggleCropBorders(_ sender: NSMenuItem) {
         let cropped = sender.state != .on
         UserDefaults.standard.set(cropped, forKey: "CropBorders")
         sender.state = cropped ? .on : .off
         showArea(cropped: cropped)
     }
+    @objc func toggleSyncToDisplay(_ sender: NSMenuItem) {
+        syncToDisplay.toggle()
+        UserDefaults.standard.set(syncToDisplay, forKey: "SyncToDisplay")
+        sender.state = syncToDisplay ? .on : .off
+    }
+    @objc func toggleFrameBlending(_ sender: NSMenuItem) {
+        view.frameBlending.toggle()
+        UserDefaults.standard.set(view.frameBlending, forKey: "FrameBlending")
+        sender.state = view.frameBlending ? .on : .off
+    }
 
     /// Shows the whole frame or the cropped area, keeping the window's height (or width) and
     /// its pixel aspect (each beam line two points high, each hires pixel one point wide).
     private func showArea(cropped: Bool, keepingWidth: Bool = false) {
-        let area = cropped ? DisplayView.croppedArea(lines: croppedLines) : DisplayView.fullArea
+        let area = cropped ? DisplayView.croppedArea(lines: croppedLines, columns: croppedColumns) : DisplayView.fullArea
         guard area != view.visibleArea else { return }
         view.visibleArea = area
         let aspect = NSSize(width: area.width, height: area.height * 2)
@@ -973,6 +1071,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let chip = machine.addItem(withTitle: "1 MB Chip RAM (ECS Agnus)", action: #selector(toggleBigChipRAM(_:)),
                                    keyEquivalent: "")
         chip.state = emulator.bigChipRAM ? .on : .off
+        let ntsc = machine.addItem(withTitle: "NTSC (60 Hz)", action: #selector(toggleNTSC(_:)), keyEquivalent: "")
+        ntsc.state = emulator.ntsc ? .on : .off
         machine.addItem(.separator())
         machine.addItem(withTitle: "Reset", action: #selector(resetMachine), keyEquivalent: "r")
         let warp = machine.addItem(withTitle: "Warp Speed", action: #selector(toggleWarp(_:)), keyEquivalent: "t")
@@ -992,6 +1092,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let crop = viewItem.submenu!.addItem(withTitle: "Crop Borders", action: #selector(toggleCropBorders(_:)), keyEquivalent: "b")
         crop.target = self
         crop.state = UserDefaults.standard.bool(forKey: "CropBorders") ? .on : .off
+        viewItem.submenu!.addItem(.separator())
+        let sync = viewItem.submenu!.addItem(withTitle: "Sync to Display (Smooth, Runs Faster than PAL)",
+                                             action: #selector(toggleSyncToDisplay(_:)), keyEquivalent: "")
+        sync.target = self
+        sync.state = syncToDisplay ? .on : .off
+        let blend = viewItem.submenu!.addItem(withTitle: "Frame Blending (When Not Synced)",
+                                              action: #selector(toggleFrameBlending(_:)), keyEquivalent: "")
+        blend.target = self
+        blend.state = view.frameBlending ? .on : .off
         main.addItem(viewItem)
         NSApp.mainMenu = main
     }

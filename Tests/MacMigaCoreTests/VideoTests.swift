@@ -149,3 +149,16 @@ private func setUpPlayfield(_ memory: inout AmigaMemory, hires: Bool) throws {
     memory.advanceChipset(colorClocks: CustomChips.colorClocksPerLine * 0x2D)
     #expect(memory.custom.bitplanePointers[0] == 0x10000 + 80)
 }
+
+@Test func displayedColumnsFollowTheDisplayWindow() throws {
+    for (start, stop) in [(UInt16(0x2C81), UInt16(0x2CC1)), (0x2871, 0xD8B1)] {
+        var memory = try videoMemory()
+        try setUpPlayfield(&memory, hires: false)
+        try memory.writeWord(start, at: 0xDFF08E)
+        try memory.writeWord(stop, at: 0xDFF090)
+        memory.advanceChipset(colorClocks: frame + 10)
+        let first = (Int(start & 0xFF) - Video.firstLowresColumn) * 2
+        let last = ((Int(stop & 0xFF) | 0x100) - Video.firstLowresColumn) * 2 - 1
+        #expect(memory.video.displayedColumns == first...last)
+    }
+}
