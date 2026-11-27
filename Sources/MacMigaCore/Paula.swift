@@ -24,6 +24,8 @@ public struct Paula: Equatable, Sendable {
 
     /// PAL colour clock rate, the rate the period counters count at.
     public static let colorClockRate = 3_546_895
+    /// NTSC colour clock rate.
+    public static let ntscColorClockRate = 3_579_545
     public internal(set) var channels = [Channel](repeating: Channel(), count: 4)
     /// Host output rate in Hz.
     public var sampleRate = 44_100
@@ -141,17 +143,18 @@ extension AmigaMemory {
     /// Box-filters `colorClocks` of the current mix down to the host rate.
     private mutating func finishAudioStep(colorClocks: Int) {
         var remaining = colorClocks
+        let clockRate = custom.ntsc ? Paula.ntscColorClockRate : Paula.colorClockRate
         while remaining > 0 {
             // Colour clocks until the next host sample is due.
-            let untilSample = (Paula.colorClockRate - audio.phase + audio.sampleRate - 1) / audio.sampleRate
+            let untilSample = (clockRate - audio.phase + audio.sampleRate - 1) / audio.sampleRate
             let count = min(remaining, max(untilSample, 1))
             remaining -= count
             audio.sumLeft += audio.left * count
             audio.sumRight += audio.right * count
             audio.sumCount += count
             audio.phase += audio.sampleRate * count
-            if audio.phase >= Paula.colorClockRate {
-                audio.phase -= Paula.colorClockRate
+            if audio.phase >= clockRate {
+                audio.phase -= clockRate
                 if audio.samples.count < audio.capacity * 2 {
                     let scale = Float(audio.sumCount) * 16384
                     audio.samples.append(Float(audio.sumLeft) / scale)

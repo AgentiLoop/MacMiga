@@ -3,7 +3,7 @@
 /// RAM, the ECS 8372A (see `Agnus`).
 ///
 /// Implements the set/clear control registers (DMACON, INTENA, INTREQ, ADKCON) and
-/// their read-back registers, a PAL beam counter for VPOSR/VHPOSR, and storage of every
+/// their read-back registers, a PAL or NTSC beam counter for VPOSR/VHPOSR, and storage of every
 /// other write-only register so later subsystems (Copper, bitplanes, Blitter, audio,
 /// disk) can consume them. No DMA, video, audio or Blitter behaviour happens here yet.
 public struct CustomChips: Equatable, Sendable {
@@ -11,7 +11,7 @@ public struct CustomChips: Equatable, Sendable {
     /// three Blitter registers: BLTCON0L (the minterm byte of BLTCON0 on its own) and the
     /// big-blit pair BLTSIZV/BLTSIZH. Its wider DMA pointers reach all of chip RAM.
     /// Its other additions are not modelled: BEAMCON0 and the programmable beam registers
-    /// are stored without effect (the beam is always PAL), as is DIWHIGH.
+    /// are stored without effect (the beam stays PAL or NTSC, see `ntsc`), as is DIWHIGH.
     public enum Agnus: Equatable, Sendable { case ocs, ecs }
 
     public enum Register {
@@ -34,9 +34,13 @@ public struct CustomChips: Equatable, Sendable {
         public static let bltcdat = 0x070, bltbdat = 0x072, bltadat = 0x074
     }
 
-    /// PAL frame geometry in colour clocks (one colour clock = two CPU clocks).
+    /// Frame geometry in colour clocks (one colour clock = two CPU clocks). `linesPerFrame`
+    /// is the PAL frame, the tallest one (and the height of the frame buffer); an NTSC frame
+    /// has `ntscLinesPerFrame`. NTSC lines are 227 colour clocks too (the real chip alternates
+    /// 227 and 228), so an NTSC frame comes about 60.2 times a second instead of 59.94.
     public static let colorClocksPerLine = 227
     public static let linesPerFrame = 312
+    public static let ntscLinesPerFrame = 262
 
     public private(set) var dmacon: UInt16 = 0
     public private(set) var intena: UInt16 = 0 {
@@ -102,8 +106,15 @@ public struct CustomChips: Equatable, Sendable {
     }
 
     public let agnus: Agnus
+    /// An NTSC Agnus (8361/8372A NTSC): 262-line frames, 60 a second, and VPOSR bit 12 set.
+    public let ntsc: Bool
+    /// Lines in this chip's frame.
+    public var frameLines: Int { ntsc ? Self.ntscLinesPerFrame : Self.linesPerFrame }
 
-    public init(agnus: Agnus = .ocs) { self.agnus = agnus }
+    public init(agnus: Agnus = .ocs, ntsc: Bool = false) {
+        self.agnus = agnus
+        self.ntsc = ntsc
+    }
 
     /// 68000 interrupt level Paula asserts (0 = none); requires the INTEN master bit.
     /// Updated on register changes so CPU steps only load the cached level.
@@ -124,8 +135,8 @@ public struct CustomChips: Equatable, Sendable {
     public mutating func readWord(offset: Int) -> UInt16 {
         switch offset & 0x1FE {
         case Register.dmaconr: return dmacon | (blitterZero ? 0x2000 : 0) // BBUSY: blits finish at once
-        // Bits 14–8: Agnus ID, PAL 8371 = $00, PAL 8372A = $20. LOF 0.
-        case Register.vposr: return (agnus == .ecs ? 0x2000 : 0) | UInt16(verticalPosition >> 8) & 0x0001
+        // Bits 14–8: Agnus ID, PAL 8371 = $00, PAL 8372A = $20; NTSC adds $10. LOF 0.
+        case Register.vposr: return (agnus == .ecs ? 0x2000 : 0) | (ntsc ? 0x1000 : 0) | UInt16(verticalPosition >> 8) & 0x0001
         case Register.vhposr: return UInt16(verticalPosition & 0xFF) << 8 | UInt16(horizontalPosition & 0xFF)
         case Register.adkconr: return adkcon
         case Register.potgor: return 0xFF00 & ~(rightMouseButton ? 0x0400 : 0) // pull-ups when released
@@ -265,7 +276,7 @@ public struct CustomChips: Equatable, Sendable {
         guard horizontalPosition >= Self.colorClocksPerLine else { return (false, false) }
         horizontalPosition = 0
         verticalPosition += 1
-        guard verticalPosition >= Self.linesPerFrame else { return (true, false) }
+        guard verticalPosition >= frameLines else { return (true, false) }
         verticalPosition = 0
         intreq |= 0x0020
         return (true, true)

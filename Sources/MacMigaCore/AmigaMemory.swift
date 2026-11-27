@@ -69,9 +69,10 @@ public struct AmigaMemory: M68KBus {
     /// hard-disk controller board. Kickstart configures both boards during startup.
     /// `extendedROM` is empty or a 512 KiB image for `$E00000`, where the A500 has nothing
     /// and later machines (CDTV, CD32) and replacement systems such as AROS keep the second
-    /// half of a 1 MiB ROM.
+    /// half of a 1 MiB ROM. `ntsc` fits an NTSC Agnus (60 frames a second) instead of a PAL one.
     public init(kickstart: [UInt8], extendedROM: [UInt8] = [], chipRAMSize: Int = 512 * 1024,
-                slowRAMSize: Int = 512 * 1024, fastRAMSize: Int = 0, hardDisk: HardDisk? = nil) throws {
+                slowRAMSize: Int = 512 * 1024, fastRAMSize: Int = 0, hardDisk: HardDisk? = nil,
+                ntsc: Bool = false) throws {
         guard kickstart.count == 256 * 1024 || kickstart.count == 512 * 1024 else {
             throw MemoryBusError.invalidROMSize(kickstart.count)
         }
@@ -81,7 +82,7 @@ public struct AmigaMemory: M68KBus {
         self.extendedROM = extendedROM
         precondition([0x8_0000, 0x10_0000, 0x20_0000].contains(chipRAMSize))
         self.chipRAM = [UInt8](repeating: 0, count: chipRAMSize)
-        self.custom = CustomChips(agnus: chipRAMSize > 0x8_0000 ? .ecs : .ocs)
+        self.custom = CustomChips(agnus: chipRAMSize > 0x8_0000 ? .ecs : .ocs, ntsc: ntsc)
         precondition(slowRAMSize >= 0 && slowRAMSize <= 0x18_0000 && slowRAMSize % 0x4_0000 == 0)
         precondition(fastRAMSize == 0 || (fastRAMSize >= 0x1_0000 && fastRAMSize <= 0x80_0000
                                           && fastRAMSize & (fastRAMSize - 1) == 0))
@@ -128,7 +129,7 @@ public struct AmigaMemory: M68KBus {
     public mutating func resetDevices() {
         ciaA = CIA8520()
         ciaB = CIA8520()
-        custom = CustomChips(agnus: custom.agnus)
+        custom = CustomChips(agnus: custom.agnus, ntsc: custom.ntsc)
         copper = Copper()
         drive = FloppyDrive(disk: drive.disk, rawTracks: drive.rawTracks) // a reset does not eject the disk
         updateDrive()

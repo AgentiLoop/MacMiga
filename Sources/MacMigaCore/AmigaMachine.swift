@@ -4,7 +4,7 @@ import M68K
 public typealias MC68000 = M68K.MC68000
 public typealias CPUError = M68K.CPUError
 
-/// An A500 (PAL) assembled from the CPU and the memory bus, stepped one instruction at a time.
+/// An A500 (PAL, or NTSC with `ntsc`) assembled from the CPU and the memory bus, stepped one instruction at a time.
 ///
 /// Each instruction takes the CPU clocks the 68000 core reports for it, and an accepted
 /// interrupt 44 more. The chipset is advanced once per instruction, not per bus cycle, and
@@ -30,10 +30,13 @@ public struct AmigaMachine {
     private var keyboardHandshakes = 0
     private var keyboardSentAt: UInt64?
 
+    /// `ntsc` makes it an NTSC A500: the NTSC Agnus (60 frames a second); clocks keep the
+    /// same ratios, so the machine is otherwise unchanged.
     public init(kickstart: [UInt8], extendedROM: [UInt8] = [], chipRAMSize: Int = 512 * 1024,
-                slowRAMSize: Int = 512 * 1024, fastRAMSize: Int = 0, hardDisk: HardDisk? = nil) throws {
+                slowRAMSize: Int = 512 * 1024, fastRAMSize: Int = 0, hardDisk: HardDisk? = nil,
+                ntsc: Bool = false) throws {
         memory = try AmigaMemory(kickstart: kickstart, extendedROM: extendedROM, chipRAMSize: chipRAMSize,
-                                 slowRAMSize: slowRAMSize, fastRAMSize: fastRAMSize, hardDisk: hardDisk)
+                                 slowRAMSize: slowRAMSize, fastRAMSize: fastRAMSize, hardDisk: hardDisk, ntsc: ntsc)
         memory.stopsOnUnmappedAccess = false
         _ = try memory.reset()
         try cpu.reset(memory: &memory)

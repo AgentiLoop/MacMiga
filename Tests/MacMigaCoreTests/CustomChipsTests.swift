@@ -159,3 +159,15 @@ private func customMemory() throws -> AmigaMemory {
     #expect(memory.custom.serialOutput.count <= 1 << 16)
     #expect(memory.custom.serialOutput.last == UInt8((70_000 - 1) & 0xFF))
 }
+
+@Test func ntscAgnusHas262LineFramesAndIdentifiesItself() {
+    var pal = CustomChips(), ntsc = CustomChips(ntsc: true), ecs = CustomChips(agnus: .ecs, ntsc: true)
+    #expect(pal.readWord(offset: CustomChips.Register.vposr) & 0x7F00 == 0x0000)
+    #expect(ntsc.readWord(offset: CustomChips.Register.vposr) & 0x7F00 == 0x1000)
+    #expect(ecs.readWord(offset: CustomChips.Register.vposr) & 0x7F00 == 0x3000)
+    let frame = CustomChips.colorClocksPerLine * CustomChips.ntscLinesPerFrame
+    #expect(ntsc.advance(colorClocks: frame) == (lines: 262, frames: 1))
+    #expect(pal.advance(colorClocks: frame).frames == 0)
+    ntsc.writeWord(offset: CustomChips.Register.intena, value: 0xC020)
+    #expect(ntsc.interruptLevel == 3) // VERTB at the end of the 262nd line
+}
