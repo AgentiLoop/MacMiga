@@ -832,7 +832,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let hardDisk = emulator.hardDiskURL { parts.append("DH0: " + hardDisk.lastPathComponent) }
         if emulator.machine == nil { parts.append("No Kickstart") }
         shownNTSC = emulator.ntsc
-        if emulator.machine != nil { parts.append(emulator.ntsc ? "NTSC" : "PAL") }
+        if emulator.machine != nil {
+            parts.append((emulator.ntsc ? "NTSC 60 Hz" : "PAL 50 Hz") + (emulator.fixedStandard == nil ? " (Auto)" : ""))
+        }
         if emulator.warp { parts.append("Warp") }
         if view.mouseCaptured { parts.append("⌘ releases the mouse") }
         window.title = parts.joined(separator: "   ")

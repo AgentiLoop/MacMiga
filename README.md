@@ -164,8 +164,8 @@ where they run about 20% fast, as they did on American Amigas.
 Choosing PAL or NTSC with a disk in fixes that disk to it (remembered by file name;
 inserting the disk later restarts the machine in that standard), and choosing Auto
 forgets it. Disks whose file name carries a `(NTSC)` or `(PAL)` tag, as in TOSEC
-sets, are fixed to that standard. The window title shows "PAL" or "NTSC" for the
-standard the machine is in.
+sets, are fixed to that standard. The window title shows the standard, "PAL 50 Hz" or "NTSC 60 Hz", with
+"(Auto)" after it when Auto chose it.
 
 View ▸ Crop Borders (⌘B) fits the window to the area the game shows bitplanes in,
 top, bottom, left and right, with a little border, once that area has stayed the
