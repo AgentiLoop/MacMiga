@@ -1,4 +1,5 @@
 import AppKit
+import AutoUpdateKit
 import AVFoundation
 import GameController
 import MetalKit
@@ -619,12 +620,22 @@ final class DisplayView: MTKView, MTKViewDelegate {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let emulator = Emulator()
     var window: NSWindow!
+    var updater: AutoUpdater!
     /// The Fast RAM submenu, whose check marks change when a WHDLoad disk turns fast RAM on.
     private var fastRAMMenu: NSMenu?
     let view = DisplayView(frame: NSRect(x: 0, y: 0, width: Video.width, height: Video.height * 2))
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildMenu()
+        // Offers new releases from GitHub (the Developer ID-signed universal zip) and installs them.
+        updater = AutoUpdater(configuration: AutoUpdateConfiguration(
+            appName: "MacMiga",
+            repository: "AgentiLoop/MacMiga",
+            tagPrefix: "v",
+            isUpdateAsset: { $0.hasSuffix("-universal.zip") },
+            teamID: "469UCUB275"
+        ))
+        updater.start()
         window = NSWindow(contentRect: view.frame, styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered, defer: false)
         view.wantsLayer = true
@@ -1034,6 +1045,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.setFrame(frame, display: true)
     }
 
+    @objc func checkForUpdates(_ sender: Any?) { Task { await updater.check(interactive: true) } }
+
     @objc func resetMachine() {
         do { try emulator.reset() } catch { alert("Reset failed: \(error)") }
         view.updateJoystick()
@@ -1044,6 +1057,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let main = NSMenu()
         let appItem = NSMenuItem()
         appItem.submenu = NSMenu()
+        appItem.submenu?.addItem(withTitle: "Check for Updates…", action: #selector(checkForUpdates(_:)), keyEquivalent: "").target = self
+        appItem.submenu?.addItem(.separator())
         appItem.submenu?.addItem(withTitle: "Quit MacMiga", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         main.addItem(appItem)
         let machineItem = NSMenuItem()
