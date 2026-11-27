@@ -691,6 +691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.contentView = view
         window.contentAspectRatio = view.frame.size
         addDriveLights()
+        addStatusLabel()
         if UserDefaults.standard.bool(forKey: "CropBorders") { showArea(cropped: true) }
         window.center()
         view.emulator = emulator
@@ -797,7 +798,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             view.show(video)
             if let frameDump { frameDump.write(video.pixels.withUnsafeBufferPointer { Data(buffer: $0) }) }
         }
-        if emulator.ntsc != shownNTSC { updateTitle() }
+        if emulator.ntsc != shownNTSC { updateStatus() }
+        countFrames()
         updateDriveLights()
     }
 
@@ -831,13 +833,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var parts = ["DF0: " + (emulator.diskURL?.lastPathComponent ?? "empty")]
         if let hardDisk = emulator.hardDiskURL { parts.append("DH0: " + hardDisk.lastPathComponent) }
         if emulator.machine == nil { parts.append("No Kickstart") }
-        shownNTSC = emulator.ntsc
-        if emulator.machine != nil {
-            parts.append((emulator.ntsc ? "NTSC 60 Hz" : "PAL 50 Hz") + (emulator.fixedStandard == nil ? " (Auto)" : ""))
-        }
         if emulator.warp { parts.append("Warp") }
         if view.mouseCaptured { parts.append("⌘ releases the mouse") }
         window.title = parts.joined(separator: "   ")
+        updateStatus()
+    }
+
+    // MARK: Video standard and frame rate
+
+    /// Top right of the title bar: the machine's standard ("PAL 50 Hz", "NTSC 60 Hz", with
+    /// "(Auto)" when Auto chose it) and the Amiga frames run in the last second.
+    private let statusLabel: NSTextField = {
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .right
+        label.frame = NSRect(x: 0, y: 7, width: 200, height: 14)
+        return label
+    }()
+    /// Frames run in the last whole second, and where that second started.
+    private var fps = 0
+    private var fpsStart = (time: 0.0, frame: 0)
+
+    private func addStatusLabel() {
+        let box = NSView(frame: NSRect(x: 0, y: 0, width: 210, height: 28))
+        box.addSubview(statusLabel)
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = box
+        accessory.layoutAttribute = .trailing
+        window.addTitlebarAccessoryViewController(accessory)
+        updateStatus()
+    }
+
+    private func updateStatus() {
+        shownNTSC = emulator.ntsc
+        guard emulator.machine != nil else { statusLabel.stringValue = ""; return }
+        statusLabel.stringValue = (emulator.ntsc ? "NTSC 60 Hz" : "PAL 50 Hz")
+            + (emulator.fixedStandard == nil ? " (Auto)" : "") + " • \(fps) fps"
+    }
+
+    /// Once a second, how many frames the machine ran in it (0 across a restart).
+    private func countFrames() {
+        guard let frame = emulator.machine?.memory.video.frameCount else { return }
+        let now = CACurrentMediaTime()
+        guard now - fpsStart.time >= 1 else { return }
+        fps = frame >= fpsStart.frame ? Int((Double(frame - fpsStart.frame) / (now - fpsStart.time)).rounded()) : 0
+        fpsStart = (now, frame)
+        updateStatus()
     }
 
     // MARK: Drive lights
