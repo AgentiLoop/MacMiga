@@ -51,6 +51,16 @@ public struct Video: Equatable, Sendable {
     /// over the frame (nil if none).
     public internal(set) var displayedColumns: ClosedRange<Int>?
     var displayingColumns: ClosedRange<Int>?
+    /// The last completed frame used beam lines only a PAL frame has (262–311): the Copper
+    /// was set to wait for one, or bitplanes were shown with a display window reaching into
+    /// them. A game made for NTSC never does either (see `AmigaMemory.autoVideoStandard`).
+    public internal(set) var usedPALLines = false
+    var usingPALLines = false
+    /// Auto video standard: frames in a row with PAL-only lines used, frames showing
+    /// bitplanes without them since the last such frame, and how many of those switch to
+    /// NTSC (doubled each time PAL lines bring the machine back to PAL, so a game that uses
+    /// them only now and then settles on PAL).
+    var palFrames = 0, quietFrames = 0, framesToNTSC = 150
 
     public init() {}
 
@@ -126,11 +136,40 @@ extension AmigaMemory {
                 video.displayingLines = nil
                 video.displayedColumns = video.displayingColumns
                 video.displayingColumns = nil
+                video.usedPALLines = video.usingPALLines
+                video.usingPALLines = false
+                if autoVideoStandard { autoSwitchVideoStandard() }
                 copper.jump(to: custom.copperLocation(1))
                 for index in 0..<8 { custom.sprites[index].dma = .idle }
             }
         }
         return (lines, frames)
+    }
+
+    /// Frames with PAL evidence before an NTSC machine switches to PAL.
+    static let framesToPAL = 2
+
+    /// Auto video standard, at the end of a frame (see `autoVideoStandard`). Frames without
+    /// bitplanes (loading, blank screens) neither count towards NTSC nor reset the count.
+    private mutating func autoSwitchVideoStandard() {
+        if video.usedPALLines {
+            video.palFrames += 1
+            video.quietFrames = 0
+        } else {
+            video.palFrames = 0
+            if video.displayedLines != nil { video.quietFrames += 1 }
+        }
+        if custom.ntsc ? video.palFrames >= Self.framesToPAL : video.quietFrames >= video.framesToNTSC {
+            custom.ntsc.toggle()
+            if custom.ntsc {
+                // Lines an NTSC frame no longer draws would keep the last PAL picture.
+                for row in CustomChips.ntscLinesPerFrame..<Video.height { video.fill(row: row, with: 0xFF00_0000) }
+            } else {
+                video.framesToNTSC *= 2
+            }
+            video.palFrames = 0
+            video.quietFrames = 0
+        }
     }
 
     /// Colour clocks from now, at most `limit` and all on the current line, in which the
@@ -180,6 +219,16 @@ extension AmigaMemory {
                 let position = (Int(first >> 8) << 8 | Int(first & 0xFE)) & mask
                 if second & 1 == 0 {
                     copper.state = .waiting(position: position, mask: mask)
+                    // Past line 255 the vertical byte means line 256 + VP. A wait for one of
+                    // the PAL-only lines (a WAIT beyond the frame, like $FFFF, ends the list).
+                    // The usual WAIT $FFDF wakes at the end of line 255 and the next WAIT is
+                    // fetched there, so the end of line 255 counts as past it.
+                    if custom.verticalPosition + (custom.horizontalPosition >= 0xD8 ? 1 : 0) >= 0x100 {
+                        let target = 0x100 | Int(first >> 8)
+                        if target >= CustomChips.ntscLinesPerFrame && target < CustomChips.linesPerFrame {
+                            video.usingPALLines = true
+                        }
+                    }
                 } else if beam & mask >= position { // SKIP
                     copper.programCounter = (copper.programCounter &+ 4) & 0x1F_FFFE
                 }
@@ -306,6 +355,7 @@ extension AmigaMemory {
             return
         }
         video.displayingLines = video.displayingLines.map { min($0.lowerBound, line)...line } ?? line...line
+        if verticalStop > CustomChips.ntscLinesPerFrame { video.usingPALLines = true }
         let firstColumn = max((Int(diwStart & 0xFF) - Video.firstLowresColumn) * 2, 0)
         let lastColumn = min(((Int(diwStop & 0xFF) | 0x100) - Video.firstLowresColumn) * 2, Video.width) - 1
         if firstColumn <= lastColumn {

@@ -39,15 +39,22 @@ final class Emulator {
     }
     /// 1 MiB of chip RAM with the ECS Agnus instead of 512 KiB with the OCS one; off by default.
     private(set) var bigChipRAM = UserDefaults.standard.bool(forKey: "ChipRAM1MB")
-    /// An NTSC machine (60 frames a second, 262 lines) instead of PAL. Starts as the NTSC
-    /// setting (off by default); a disk known to be NTSC or PAL, from a `(NTSC)`/`(PAL)` tag in
-    /// its file name or the choice remembered for it, switches it (see `insert`).
-    private(set) var ntsc = UserDefaults.standard.bool(forKey: "NTSC")
-    /// Frames a second the machine makes.
-    var frameRate: Double { ntsc ? 60 : 50 }
+    /// Machine ▸ Video Standard without a known disk: nil for Auto (the default), where the
+    /// machine starts as PAL and follows the running program (`AmigaMemory.autoVideoStandard`,
+    /// as in the C64 emulator), or a fixed PAL (false) or NTSC (true).
+    private(set) var standardSetting: Bool? = UserDefaults.standard.string(forKey: "VideoStandard").flatMap {
+        $0 == "NTSC" ? true : $0 == "PAL" ? false : nil
+    }
     /// Disk images known to be NTSC (true) or PAL (false), by file name, as chosen in the
     /// Machine menu while the disk was in.
     private var diskStandards = UserDefaults.standard.dictionary(forKey: "DiskNTSC") as? [String: Bool] ?? [:]
+    /// The fixed standard for the disk in the drive (its `(NTSC)`/`(PAL)` tag or the choice
+    /// remembered for it), else the setting; nil means Auto.
+    var fixedStandard: Bool? { diskURL.flatMap(knownNTSC) ?? standardSetting }
+    /// The machine is NTSC (60 frames a second, 262 lines) at the moment.
+    var ntsc: Bool { machine?.memory.custom.ntsc ?? false }
+    /// Frames a second the machine makes.
+    var frameRate: Double { ntsc ? 60 : 50 }
     var onError: ((String) -> Void)?
     let audio = AudioOutput()
 
@@ -55,7 +62,8 @@ final class Emulator {
         let extendedROM = try extended.map { Array(try Data(contentsOf: $0)) } ?? []
         var machine = try AmigaMachine(kickstart: Array(try Data(contentsOf: url)), extendedROM: extendedROM,
                                        chipRAMSize: bigChipRAM ? 1 << 20 : 512 << 10,
-                                       fastRAMSize: fastRAM << 20, hardDisk: hardDisk, ntsc: ntsc)
+                                       fastRAMSize: fastRAM << 20, hardDisk: hardDisk, ntsc: fixedStandard ?? false)
+        machine.memory.autoVideoStandard = fixedStandard == nil
         if let audio { machine.memory.audio.sampleRate = audio.sampleRate }
         self.machine = machine
         romURL = url
@@ -69,17 +77,24 @@ final class Emulator {
         if let romURL { try load(rom: romURL, extended: extendedROMURL) }
     }
 
-    /// Inserts a disk. One known to be for the other video standard (from its file name tag or
-    /// remembered) restarts the machine in that standard, with the disk in. An unknown disk
-    /// (such as a game's second disk) leaves the machine as it is.
+    /// Inserts a disk. One known to be PAL or NTSC (from its file name tag or remembered)
+    /// fixes the machine to that standard, restarting it if it is in the other one. An
+    /// unknown disk (such as a game's second disk) leaves the machine as it is.
     func insert(adf url: URL) throws {
         let bytes = Array(try Data(contentsOf: url))
         try machine?.memory.insertDisk(adf: bytes)
         disk = bytes
         diskURL = url
-        if let wanted = knownNTSC(url), wanted != ntsc {
-            ntsc = wanted
+        if let wanted = knownNTSC(url) { try apply(standard: wanted) }
+    }
+
+    /// Fixes the machine to PAL or NTSC (restarting it if it is in the other one), or nil
+    /// for Auto, which takes effect from the next frame.
+    private func apply(standard: Bool?) throws {
+        if let standard, standard != ntsc {
             try reset()
+        } else {
+            machine?.memory.autoVideoStandard = standard == nil
         }
     }
 
@@ -127,16 +142,19 @@ final class Emulator {
         try reset()
     }
 
-    /// The Machine menu's choice: with a disk in, that disk's standard (remembered, so the disk
-    /// starts in it next time); without one, the standard the machine starts in.
-    func setNTSC(_ enabled: Bool) throws {
-        ntsc = enabled
-        if let diskURL {
-            remember(ntsc: enabled, for: diskURL)
+    /// The Machine menu's choice (nil = Auto). PAL or NTSC with a disk in applies to that disk
+    /// (remembered, so it starts in it next time); otherwise it is the setting. Auto also
+    /// forgets the disk's remembered choice.
+    func setStandard(_ standard: Bool?) throws {
+        if let diskURL, let standard {
+            remember(ntsc: standard, for: diskURL)
         } else {
-            UserDefaults.standard.set(enabled, forKey: "NTSC")
+            if let diskURL { diskStandards[diskURL.lastPathComponent] = nil }
+            UserDefaults.standard.set(diskStandards, forKey: "DiskNTSC")
+            standardSetting = standard
+            UserDefaults.standard.set(standard.map { $0 ? "NTSC" : "PAL" } ?? "Auto", forKey: "VideoStandard")
         }
-        try reset()
+        try apply(standard: fixedStandard)
     }
 
     /// Writes the blocks the Amiga changed since the last call back into the image file.
@@ -650,8 +668,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var updater: AutoUpdater!
     /// The Fast RAM submenu, whose check marks change when a WHDLoad disk turns fast RAM on.
     private var fastRAMMenu: NSMenu?
-    /// Machine ▸ NTSC (60 Hz), whose check mark follows the disk's standard.
-    private var ntscItem: NSMenuItem?
+    /// Machine ▸ Video Standard (Auto, PAL, NTSC; tags nil, 0, 1), whose check mark follows the disk.
+    private var standardMenu: NSMenu?
+    /// Whether the machine was NTSC after the last frame, to notice Auto switching it.
+    private var shownNTSC = false
     let view = DisplayView(frame: NSRect(x: 0, y: 0, width: Video.width, height: Video.height * 2))
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -777,6 +797,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             view.show(video)
             if let frameDump { frameDump.write(video.pixels.withUnsafeBufferPointer { Data(buffer: $0) }) }
         }
+        if emulator.ntsc != shownNTSC { updateTitle() }
         updateDriveLights()
     }
 
@@ -810,7 +831,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         var parts = ["DF0: " + (emulator.diskURL?.lastPathComponent ?? "empty")]
         if let hardDisk = emulator.hardDiskURL { parts.append("DH0: " + hardDisk.lastPathComponent) }
         if emulator.machine == nil { parts.append("No Kickstart") }
-        if emulator.ntsc { parts.append("NTSC") }
+        shownNTSC = emulator.ntsc
+        if emulator.ntsc { parts.append(emulator.fixedStandard == nil ? "NTSC (Auto)" : "NTSC") }
         if emulator.warp { parts.append("Warp") }
         if view.mouseCaptured { parts.append("⌘ releases the mouse") }
         window.title = parts.joined(separator: "   ")
@@ -919,17 +941,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func insert(adf url: URL) {
-        let wasNTSC = emulator.ntsc
         do { try emulator.insert(adf: url) } catch { alert("Could not insert \(url.lastPathComponent): \(error)") }
-        if emulator.ntsc != wasNTSC { standardChanged() }
+        updateStandardMenu()
+        view.updateJoystick()
         updateTitle()
     }
 
-    /// After inserting a disk restarted the machine as PAL or NTSC.
-    private func standardChanged() {
-        ntscItem?.state = emulator.ntsc ? .on : .off
-        view.updateJoystick()
-        updateTitle()
+    /// Checks Auto, PAL or NTSC as it applies to the disk in the drive.
+    private func updateStandardMenu() {
+        let tag = emulator.fixedStandard.map { $0 ? 1 : 0 } ?? -1
+        standardMenu?.items.forEach { $0.state = $0.tag == tag ? .on : .off }
     }
 
     private func attach(hardDisk url: URL?) {
@@ -1040,9 +1061,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         sender.state = emulator.bigChipRAM ? .on : .off
         view.updateJoystick()
     }
-    @objc func toggleNTSC(_ sender: NSMenuItem) {
-        do { try emulator.setNTSC(!emulator.ntsc) } catch { alert("Reset failed: \(error)") }
-        sender.state = emulator.ntsc ? .on : .off
+    @objc func chooseStandard(_ sender: NSMenuItem) {
+        do { try emulator.setStandard(sender.tag < 0 ? nil : sender.tag == 1) } catch { alert("Reset failed: \(error)") }
+        updateStandardMenu()
         view.updateJoystick()
         updateTitle()
     }
@@ -1120,9 +1141,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let chip = machine.addItem(withTitle: "1 MB Chip RAM (ECS Agnus)", action: #selector(toggleBigChipRAM(_:)),
                                    keyEquivalent: "")
         chip.state = emulator.bigChipRAM ? .on : .off
-        let ntsc = machine.addItem(withTitle: "NTSC (60 Hz)", action: #selector(toggleNTSC(_:)), keyEquivalent: "")
-        ntsc.state = emulator.ntsc ? .on : .off
-        ntscItem = ntsc
+        let standards = NSMenu()
+        for (title, tag) in [("Auto", -1), ("PAL (50 Hz)", 0), ("NTSC (60 Hz)", 1)] {
+            standards.addItem(withTitle: title, action: #selector(chooseStandard(_:)), keyEquivalent: "").tag = tag
+        }
+        machine.addItem(withTitle: "Video Standard", action: nil, keyEquivalent: "").submenu = standards
+        standardMenu = standards
+        updateStandardMenu()
         machine.addItem(.separator())
         machine.addItem(withTitle: "Reset", action: #selector(resetMachine), keyEquivalent: "r")
         let warp = machine.addItem(withTitle: "Warp Speed", action: #selector(toggleWarp(_:)), keyEquivalent: "t")

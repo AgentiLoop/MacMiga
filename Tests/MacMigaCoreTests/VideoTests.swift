@@ -162,3 +162,44 @@ private func setUpPlayfield(_ memory: inout AmigaMemory, hires: Bool) throws {
         #expect(memory.video.displayedColumns == first...last)
     }
 }
+
+@Test func autoVideoStandardFollowsThePALOnlyLines() throws {
+    var memory = try videoMemory()
+    memory.autoVideoStandard = true
+    try setUpPlayfield(&memory, hires: false)
+    let ntscFrame = CustomChips.colorClocksPerLine * CustomChips.ntscLinesPerFrame
+    // A display window down to line $12C uses PAL-only lines: the machine stays PAL.
+    memory.advanceChipset(colorClocks: frame * 200)
+    #expect(memory.video.usedPALLines && !memory.custom.ntsc)
+
+    // An NTSC-sized window ($2C-$F4) for three seconds of frames: NTSC.
+    try memory.writeWord(0xF4C1, at: 0xDFF090)
+    memory.advanceChipset(colorClocks: frame * 149)
+    #expect(!memory.custom.ntsc)
+    memory.advanceChipset(colorClocks: frame * 2)
+    #expect(memory.custom.ntsc && !memory.video.usedPALLines)
+
+    // The PAL window again: back to PAL after two frames, and NTSC now takes twice as long.
+    try memory.writeWord(0x2CC1, at: 0xDFF090)
+    memory.advanceChipset(colorClocks: ntscFrame * 3)
+    #expect(!memory.custom.ntsc)
+    try memory.writeWord(0xF4C1, at: 0xDFF090)
+    memory.advanceChipset(colorClocks: frame * 200)
+    #expect(!memory.custom.ntsc)
+    memory.advanceChipset(colorClocks: frame * 102)
+    #expect(memory.custom.ntsc)
+}
+
+@Test func copperWaitForAPALOnlyLineIsPALEvidence() throws {
+    var memory = try videoMemory()
+    // WAIT $FFDF, WAIT $2C07 (line 300), MOVE COLOR00, WAIT $FFFF (end of list).
+    try store([0xFFDF, 0xFFFE, 0x2C07, 0xFFFE, 0x0180, 0x0F00, 0xFFFF, 0xFFFE], at: 0x1000, in: &memory)
+    try memory.writeLong(0x1000, at: 0xDFF080)
+    try memory.writeWord(0x8280, at: 0xDFF096)                    // DMAEN | COPEN
+    memory.advanceChipset(colorClocks: frame * 2)
+    #expect(memory.video.usedPALLines)
+    // Without the wait for line 300 (WAIT $FFDF then the end of the list): no evidence.
+    try store([0xFFDF, 0xFFFE, 0xFFFF, 0xFFFE], at: 0x1000, in: &memory)
+    memory.advanceChipset(colorClocks: frame * 2)
+    #expect(!memory.video.usedPALLines)
+}

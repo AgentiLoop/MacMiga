@@ -107,7 +107,8 @@ public struct CustomChips: Equatable, Sendable {
 
     public let agnus: Agnus
     /// An NTSC Agnus (8361/8372A NTSC): 262-line frames, 60 a second, and VPOSR bit 12 set.
-    public let ntsc: Bool
+    /// Changes only between frames (`AmigaMemory.autoVideoStandard`).
+    public internal(set) var ntsc: Bool
     /// Lines in this chip's frame.
     public var frameLines: Int { ntsc ? Self.ntscLinesPerFrame : Self.linesPerFrame }
 

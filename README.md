@@ -145,17 +145,27 @@ speed only while the floppy is busy: while its motor is on and the drive has
 stepped, spun up or transferred data within the last emulated second. Sound is
 skipped during those stretches, as with Warp Speed.
 
-Machine ▸ NTSC (60 Hz) restarts the machine as an NTSC Amiga: 262-line frames,
-60 a second, the NTSC Agnus ID in VPOSR and the NTSC audio clock. Games made in
-the US (such as Amiga Boulder Dash) run at their intended pace this way and move
-evenly on a 60 Hz display. With a disk in, the choice is remembered for that disk
-(by file name), and inserting the disk later restarts the machine in that standard;
-without a disk it sets the standard the app starts in (PAL by default). Disks
-whose file name carries a `(NTSC)` or `(PAL)` tag, as in TOSEC sets, are put in
-the right standard automatically. Nothing else on a disk says which standard it
-was made for: judging by the picture's size was tried and wrongly took 7 of 12 PAL
-games for NTSC, so untagged disks keep the current standard until you choose one.
-The window title shows "NTSC" while the machine is NTSC.
+Machine ▸ Video Standard picks PAL (50 Hz), NTSC (60 Hz) or Auto (the default).
+NTSC is an NTSC Amiga: 262-line frames, 60 a second, the NTSC Agnus ID in VPOSR
+and the NTSC audio clock. Games made in the US (such as Amiga Boulder Dash) run at
+their intended pace this way and move evenly on a 60 Hz display.
+
+Auto works like the C64 emulator's: the machine starts as PAL and watches what the
+running program does with the lines only a PAL frame has (262–311). A Copper list
+waiting for one of them, or a display window reaching into them, is PAL evidence;
+two such frames switch an NTSC machine back to PAL. Three seconds of pictures
+without any switch a PAL machine to NTSC (six seconds after a return to PAL, then
+twelve, so a program that only now and then uses them settles on PAL). The switch
+happens between frames, without a restart. On the test disks Amiga Boulder Dash
+switches to NTSC when its first cave starts; 8 of 12 PAL games stay PAL; Lotus,
+Nicky Boom, Supercars II and Zeron never use a PAL-only line and switch to NTSC,
+where they run about 20% fast, as they did on American Amigas.
+
+Choosing PAL or NTSC with a disk in fixes that disk to it (remembered by file name;
+inserting the disk later restarts the machine in that standard), and choosing Auto
+forgets it. Disks whose file name carries a `(NTSC)` or `(PAL)` tag, as in TOSEC
+sets, are fixed to that standard. The window title shows "NTSC (Auto)" or "NTSC"
+while the machine is NTSC.
 
 View ▸ Crop Borders (⌘B) fits the window to the area the game shows bitplanes in,
 top, bottom, left and right, with a little border, once that area has stayed the

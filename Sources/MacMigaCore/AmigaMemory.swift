@@ -41,6 +41,13 @@ public struct AmigaMemory: M68KBus {
     public internal(set) var drive = FloppyDrive()
     /// Paula's four audio channels and the mixed host sample stream, driven by `advanceChipset`.
     public var audio = Paula()
+    /// Auto video standard, as the C64 emulator's VIC-II does it: a program shows which
+    /// standard it was made for by whether it uses the lines only PAL has (see
+    /// `Video.usedPALLines`). Two frames using them switch an NTSC machine to PAL; three
+    /// seconds of frames showing bitplanes without them switch a PAL machine to NTSC (six
+    /// after the first return to PAL, and so on). The switch happens between frames,
+    /// without a reset. Off by default.
+    public var autoVideoStandard = false
     /// When true (the default, for bus diagnostics), byte accesses to addresses with nothing
     /// behind them throw `MemoryBusError.unmappedAddress`. When false (hardware behaviour,
     /// set by `AmigaMachine`), such reads return 0 and writes are ignored; the A500 has no
