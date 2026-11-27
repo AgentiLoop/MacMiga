@@ -3,13 +3,14 @@
 A Commodore Amiga 500 emulator for macOS, written in Swift. MacMiga is open
 source under the [MIT License](LICENSE) and a work in progress.
 
-**[Website](https://macmiga.xcf.ai) · [Download 0.0.1](https://github.com/AgentiLoop/MacMiga/releases/tag/v0.0.1) · [Sister project: C64 / C128](https://c64.xcf.ai)**
+**[Website](https://macmiga.xcf.ai) · [Download 0.0.2](https://github.com/AgentiLoop/MacMiga/releases/tag/v0.0.2) · [Sister project: C64 / C128](https://c64.xcf.ai)**
 
-The 0.0.1 download is a Universal app for Apple silicon and Intel Macs running
+The 0.0.2 download is a Universal app for Apple silicon and Intel Macs running
 macOS 13 or newer, signed with Developer ID, notarized by Apple, and stapled.
 Unzip it, move MacMiga.app to Applications, then supply your own Kickstart ROM
 and disk images. No ROMs, operating systems, or games are included.
-Compatibility is still evolving; this is the first public release.
+From 0.0.2 on the app checks for new releases and installs them itself
+(MacMiga ▸ Check for Updates…). Compatibility is still evolving.
 
 <table>
   <tr>
@@ -28,11 +29,21 @@ Compatibility is still evolving; this is the first public release.
     <td align="center">Kickstart 3.1 booted from a hard disk image</td>
     <td align="center">AROS, started from its boot floppy</td>
   </tr>
+  <tr>
+    <td width="50%"><img alt="Amiga Boulder Dash's title screen on an NTSC machine" src="docs/boulder-dash-ntsc-title.png" /></td>
+    <td width="50%"><img alt="Amiga Boulder Dash's first cave on an NTSC machine" src="docs/boulder-dash-ntsc-cave.png" /></td>
+  </tr>
+  <tr>
+    <td align="center">Amiga Boulder Dash (1993, PD), NTSC, title screen</td>
+    <td align="center">Amiga Boulder Dash, NTSC, cave 1</td>
+  </tr>
 </table>
 
-The first picture is a capture of the app's window. The other three are frames
+The first picture is a capture of the app's window. The others are frames
 written by the emulator itself (`KickstartProbe --frames`, see "Local Kickstart
-startup probe"), with each line doubled as the app's window shows them.
+startup probe", or the same core driven by a small test program for the Boulder
+Dash pictures, which are cropped as Crop Borders shows them), with each line
+doubled as the app's window shows them.
 
 ## Status
 
@@ -91,7 +102,7 @@ available, otherwise ad-hoc signing for local builds.
 
 `Bundle/make-app.sh --release` requires Developer ID signing, enables the
 hardened runtime, submits the archive to Apple, staples and validates the ticket,
-and checks Gatekeeper before creating `.build/MacMiga-0.0.1-universal.zip`
+and checks Gatekeeper before creating `.build/MacMiga-0.0.2-universal.zip`
 and `.build/SHA256SUMS.txt`. The default notary keychain profile is
 `App Store Connect Profile`; override it with `NOTARY_PROFILE`, or choose a
 signing identity with `SIGN_ID`.
@@ -134,14 +145,39 @@ speed only while the floppy is busy: while its motor is on and the drive has
 stepped, spun up or transferred data within the last emulated second. Sound is
 skipped during those stretches, as with Warp Speed.
 
+Machine ▸ NTSC (60 Hz) restarts the machine as an NTSC Amiga: 262-line frames,
+60 a second, the NTSC Agnus ID in VPOSR and the NTSC audio clock. Games made in
+the US (such as Amiga Boulder Dash) run at their intended pace this way and move
+evenly on a 60 Hz display. With a disk in, the choice is remembered for that disk
+(by file name), and inserting the disk later restarts the machine in that standard;
+without a disk it sets the standard the app starts in (PAL by default). Disks
+whose file name carries a `(NTSC)` or `(PAL)` tag, as in TOSEC sets, are put in
+the right standard automatically. Nothing else on a disk says which standard it
+was made for: judging by the picture's size was tried and wrongly took 7 of 12 PAL
+games for NTSC, so untagged disks keep the current standard until you choose one.
+The window title shows "NTSC" while the machine is NTSC.
+
+View ▸ Crop Borders (⌘B) fits the window to the area the game shows bitplanes in,
+top, bottom, left and right, with a little border, once that area has stayed the
+same for half a second. View ▸ Sync to Display (on by default) runs one Amiga
+frame per display refresh (one per two at 100 Hz and up): smooth on a 60 Hz
+display, though a PAL game then runs 20% fast (its sound is sped up to match).
+With it off, frames run at the machine's own rate, and View ▸ Frame Blending
+mixes the two latest frames on each refresh so a 50 Hz game moves evenly on a
+60 Hz display, at the cost of slight ghosting.
+
+MacMiga ▸ Check for Updates… looks for a newer release on GitHub (the app also
+looks shortly after launch and every six hours), and installs it after checking
+that it is signed with the same Developer ID ([AutoUpdateKit](https://github.com/AgentiLoop/AutoUpdateKit)).
+
 With no arguments it reuses the last ROM, or `Kickstart ROMs/kickstart-1.3.rom`
 in the current folder, or asks for one. The Machine menu opens a Kickstart ROM
 (⌘K), inserts (⌘O) or ejects (⌘E) a DF0 ADF or DMS image, and resets (⌘R). Files can also be
 dropped on the window: a `.rom` or `.bin` is opened as the Kickstart (and
 remembered, as from the menu), an `.adf` or `.dms` goes into DF0 and an `.hdf` is attached
 as DH0. The window shows
-the full 736×312 frame doubled vertically, emulating one frame per 1/50 s timer
-tick on the main thread. Keys map by US-layout position to Amiga raw codes
+the full 736×312 frame doubled vertically, emulating frames on the main thread
+as the display refreshes (Metal, drawn on vsync). Keys map by US-layout position to Amiga raw codes
 (Command → Amiga keys, Option → Alt, Page Up/Help → Help); Command-key shortcuts
 go to the menu instead, so the Amiga keys only work as plain modifiers. A click
 in the window captures the Mac pointer for the Amiga mouse, and pressing ⌘
@@ -195,7 +231,7 @@ Supply your own authorized, raw, unencrypted ROM when integrating the core.
   An unselected CIA byte lane reads `$FF` (real hardware: open bus).
 - OCS custom chip registers (`CustomChips.swift`) at `$DFF000`–`$DFFFFF`,
   mirrored every `$200`: set/clear DMACON, INTENA, INTREQ and ADKCON with their
-  read-back registers, Paula interrupt-level priority, a PAL beam counter for
+  read-back registers, Paula interrupt-level priority, a PAL (or NTSC) beam counter for
   VPOSR/VHPOSR that raises VERTB each frame, and storage of all other writes.
   Word accesses are not split; a byte write appears on both bus halves. No DMA,
   video, audio, Blitter or Copper behaviour yet. Write-only registers read 0 (real hardware: bus noise),
@@ -504,7 +540,9 @@ source, so real reads there return bus noise).
 
 ## Machine loop
 
-`Sources/MacMigaCore/AmigaMachine.swift` wires CPU and bus as a PAL A500. Before
+`Sources/MacMigaCore/AmigaMachine.swift` wires CPU and bus as a PAL A500 (or,
+with `ntsc: true`, an NTSC one: 262-line frames and VPOSR's NTSC bit; lines stay
+227 colour clocks, where real NTSC chips alternate 227 and 228). Before
 each instruction Paula's interrupt level is presented to the CPU. Each instruction
 takes the CPU clocks the 68000 core returns for it (see "Instruction timing"),
 an accepted interrupt 44 more, and an idle step while stopped 4. The chipset
@@ -717,7 +755,7 @@ reaches all of chip RAM; and three Blitter registers exist: BLTCON0L (`$05A`,
 the minterm byte of BLTCON0), BLTSIZV (`$05C`) and BLTSIZH (`$05E`) for blits
 up to 32,768 lines by 2,048 words, started by the BLTSIZH write. With the OCS
 Agnus those three addresses do nothing. Not modelled: BEAMCON0 and the
-programmable beam registers (stored without effect; the beam is always PAL)
+programmable beam registers (stored without effect; the beam stays PAL or NTSC)
 and DIWHIGH.
 
 Measured with the probe on November 25, 2026 (60,000,000 instructions, no
